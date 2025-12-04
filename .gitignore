@@ -1,0 +1,13 @@
+# Environnement virtuel
+.venv/
+
+# Variables d'environnement (mots de passe, clés API, etc.)
+.env
+
+# Fichiers Python temporaires
+__pycache__/
+*.pyc
+
+# Fichiers uploadés (logs, fichiers utilisateurs…)
+uploads/
+logs/
