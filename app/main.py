@@ -45,7 +45,7 @@ app = FastAPI(
     version=settings.PROJECT_VERSION,
 )
 
-# Allow all localhost origins for development
+# Allow all localhost origins for development + production domains
 origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -55,6 +55,8 @@ origins = [
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
+    # Production Heroku
+    "https://novabank-frontend-f9d4c030d386.herokuapp.com",
 ]
 
 app.add_middleware(
