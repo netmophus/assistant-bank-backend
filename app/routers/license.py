@@ -12,11 +12,12 @@ router = APIRouter(
 
 
 @router.post("", response_model=LicensePublic)
-async def create_lic(lic_in: LicenseCreate):
+async def create_lic(lic_in: LicenseCreate, current_user: dict = Depends(get_current_user)):
     """
-    Crée une licence pour une organisation (banque).
-    Plus tard : réservé au super_admin.
+    Crée une licence pour une organisation. Réservé au superadmin.
     """
+    if current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Accès réservé au superadmin.")
     try:
         lic = await create_license(lic_in)
         return lic
@@ -28,25 +29,25 @@ async def create_lic(lic_in: LicenseCreate):
 
 
 @router.get("/by-org/{org_id}", response_model=list[LicensePublic])
-async def get_licenses_for_org(org_id: str):
+async def get_licenses_for_org(org_id: str, current_user: dict = Depends(get_current_user)):
     """
-    Liste des licences d'une organisation.
+    Liste des licences d'une organisation. Superadmin ou admin de la même org.
     """
+    role = current_user.get("role")
+    if role != "superadmin" and current_user.get("organization_id") != org_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Accès non autorisé.")
     items = await list_licenses_by_org(org_id)
     return items
 
 
 @router.get("", response_model=list[LicensePublic])
-async def get_all_licenses():
+async def get_all_licenses(current_user: dict = Depends(get_current_user)):
     """
-    Liste toutes les licences (pour super admin).
+    Liste toutes les licences. Réservé au superadmin.
     """
-    from app.models.license import list_licenses_by_org
-    
-    # Récupérer toutes les licences en listant toutes les organisations
-    # Pour simplifier, on fait une requête directe
+    if current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Accès réservé au superadmin.")
     from app.models.license import LICENSES_COLLECTION, _license_doc_to_public
-    
     db = get_database()
     cursor = db[LICENSES_COLLECTION].find({})
     licenses = []
@@ -56,12 +57,13 @@ async def get_all_licenses():
 
 
 @router.put("/{license_id}", response_model=LicensePublic)
-async def update_lic(license_id: str, lic_update: LicenseUpdate):
+async def update_lic(license_id: str, lic_update: LicenseUpdate, current_user: dict = Depends(get_current_user)):
     """
-    Met à jour une licence.
+    Met à jour une licence. Réservé au superadmin.
     """
+    if current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Accès réservé au superadmin.")
     try:
-        # Convertir le modèle Pydantic en dict, en excluant les valeurs None
         update_data = lic_update.model_dump(exclude_unset=True)
         lic = await update_license(license_id, update_data)
         return lic

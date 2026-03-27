@@ -546,16 +546,10 @@ async def forgot_password(data: dict):
             return {"message": "Si l'email existe, un lien de réinitialisation a été envoyé"}
         
         # TODO: Implémenter l'envoi d'email avec le lien de réinitialisation
-        # Pour le moment, on simule l'envoi
-        import secrets
-        token = secrets.token_urlsafe(32)
-        
-        # Ici vous devriez implémenter l'envoi d'email réel
-        # Par exemple avec sendgrid, mailgun, ou autre service SMTP
-        
+        # (sendgrid, mailgun, ou autre service SMTP)
+
         return {
-            "message": "Si l'email existe, un lien de réinitialisation a été envoyé",
-            "token": token  # Pour le développement uniquement
+            "message": "Si l'email existe, un lien de réinitialisation a été envoyé"
         }
         
     except Exception as e:
