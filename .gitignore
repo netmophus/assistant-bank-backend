@@ -11,3 +11,15 @@ __pycache__/
 # Fichiers uploadés (logs, fichiers utilisateurs…)
 uploads/
 logs/
+
+# Node
+node_modules/
+package-lock.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

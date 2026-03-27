@@ -169,14 +169,35 @@ async def delete_ressource(ressource_id: str) -> bool:
     return result.deleted_count > 0
 
 
-async def assign_ressource_to_departments(ressource_id: str, department_ids: List[str]) -> bool:
-    """Affecte une ressource à plusieurs départements"""
+async def assign_ressource_to_departments(ressource_id: str, department_ids: List[str], org_id: str) -> bool:
+    """
+    Affecte une ressource à plusieurs départements.
+    Valide que la ressource et tous les départements appartiennent à la même organisation.
+    """
     db = get_database()
     try:
         ressource_oid = ObjectId(ressource_id)
+        org_oid = ObjectId(org_id)
         dept_oids = [ObjectId(dept_id) for dept_id in department_ids]
     except Exception:
         return False
+    
+    # Vérifier que la ressource existe et appartient à l'organisation
+    ressource_doc = await db[RESSOURCES_COLLECTION].find_one({
+        "_id": ressource_oid,
+        "organization_id": org_oid
+    })
+    if not ressource_doc:
+        raise ValueError("Ressource introuvable ou n'appartient pas à votre organisation.")
+    
+    # Vérifier que tous les départements appartiennent à la même organisation
+    for dept_oid in dept_oids:
+        dept_doc = await db["departments"].find_one({
+            "_id": dept_oid,
+            "organization_id": org_oid
+        })
+        if not dept_doc:
+            raise ValueError(f"Département {str(dept_oid)} introuvable ou n'appartient pas à votre organisation.")
     
     # Supprimer les anciennes affectations
     await db[RESSOURCES_ASSIGNMENT_COLLECTION].delete_many({"ressource_id": ressource_oid})

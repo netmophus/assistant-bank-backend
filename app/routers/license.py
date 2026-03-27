@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 
 from app.schemas.license import LicenseCreate, LicensePublic, LicenseUpdate
-from app.models.license import create_license, list_licenses_by_org, update_license
+from app.models.license import create_license, list_licenses_by_org, update_license, org_has_active_license
 from app.core.db import get_database
+from app.core.deps import get_current_user
 
 router = APIRouter(
     prefix="/licenses",
@@ -69,3 +70,32 @@ async def update_lic(license_id: str, lic_update: LicenseUpdate):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+
+
+@router.get("/check-active")
+async def check_active_license(current_user: dict = Depends(get_current_user)):
+    """
+    Vérifie si l'organisation de l'utilisateur connecté a une licence active.
+    Utilisé par le frontend pour conditionner l'affichage des fonctionnalités premium.
+    
+    Returns:
+        {
+            "has_active_license": bool,
+            "organization_id": str | None
+        }
+    """
+    organization_id = current_user.get("organization_id")
+    
+    if not organization_id:
+        # Superadmin ou utilisateur sans organisation
+        return {
+            "has_active_license": True,  # Superadmin a toujours accès
+            "organization_id": None
+        }
+    
+    has_license = await org_has_active_license(organization_id)
+    
+    return {
+        "has_active_license": has_license,
+        "organization_id": organization_id
+    }

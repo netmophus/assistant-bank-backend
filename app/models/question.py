@@ -6,6 +6,8 @@ from app.core.db import get_database
 from app.models.user import get_user_by_id
 from app.models.department import get_department_by_id, get_service_by_id
 
+import logging
+
 QUESTIONS_COLLECTION = "questions"
 QUOTA_LIMIT = 60  # 60 questions par mois
 
@@ -76,9 +78,10 @@ async def check_user_quota(user_id: str) -> tuple[bool, dict]:
     return can_ask, stats
 
 
-async def create_question(user_id: str, question_text: str, context: Optional[str] = None) -> dict:
+async def create_question_without_answer(user_id: str, question_text: str, context: Optional[str] = None) -> dict:
     """
-    Crée une question pour un utilisateur.
+    Crée une question pour un utilisateur SANS générer de réponse.
+    Utile pour les conversations où la réponse sera générée avec historique.
     Vérifie d'abord le quota.
     """
     # Vérifier le quota
@@ -131,18 +134,91 @@ async def create_question(user_id: str, question_text: str, context: Optional[st
     result = await db[QUESTIONS_COLLECTION].insert_one(doc)
     doc["_id"] = result.inserted_id
     
-    # Appeler l'IA pour générer la réponse
+    return _question_doc_to_public(doc)
+
+
+async def create_question(user_id: str, question_text: str, context: Optional[str] = None) -> dict:
+    """
+    Crée une question pour un utilisateur.
+    Vérifie d'abord le quota.
+    """
+    # Vérifier le quota
+    can_ask, stats = await check_user_quota(user_id)
+    if not can_ask:
+        raise ValueError(
+            f"Quota mensuel dépassé. Vous avez utilisé {stats['questions_asked']}/{stats['quota_limit']} questions ce mois-ci."
+        )
+    
+    # Récupérer les informations de l'utilisateur
+    user = await get_user_by_id(user_id)
+    if not user:
+        raise ValueError("Utilisateur introuvable.")
+    
+    db = get_database()
     try:
-        from app.services.ai_service import generate_question_answer
-        answer = await generate_question_answer(
+        user_oid = ObjectId(user_id)
+    except Exception:
+        raise ValueError("user_id invalide.")
+    
+    # Récupérer l'ID de l'organisation pour la recherche dans la base de connaissances
+    organization_id = str(user.get("organization_id")) if user.get("organization_id") else None
+    
+    # Récupérer les noms du département et service si présents
+    department_name = None
+    service_name = None
+    
+    if user.get("department_id"):
+        dept = await get_department_by_id(str(user["department_id"]))
+        if dept:
+            department_name = dept.get("name")
+    
+    if user.get("service_id"):
+        service = await get_service_by_id(str(user["service_id"]))
+        if service:
+            service_name = service.get("name")
+    
+    doc = {
+        "user_id": user_oid,
+        "user_email": user.get("email"),
+        "user_name": user.get("full_name"),
+        "department_id": user.get("department_id"),
+        "department_name": department_name,
+        "service_id": user.get("service_id"),
+        "service_name": service_name,
+        "question": question_text,
+        "context": context,
+        "answer": None,
+        "status": "pending",
+        "created_at": datetime.utcnow(),
+    }
+    
+    result = await db[QUESTIONS_COLLECTION].insert_one(doc)
+    doc["_id"] = result.inserted_id
+    
+    # Générer la réponse via RAG New (GLOBAL -> LOCAL -> IA générale)
+    try:
+        allow_global = False
+        if organization_id:
+            from app.models.license import org_has_active_license
+
+            allow_global = await org_has_active_license(organization_id)
+
+        from app.services.rag_new_service import answer_question
+
+        answer, _strategy, _sources, _debug = await answer_question(
             question=question_text,
-            context=context,
-            user_department=department_name,
-            user_service=service_name
+            organization_id=organization_id,
+            category=None,
+            allow_global=allow_global,
         )
     except Exception as e:
         # En cas d'erreur, utiliser une réponse par défaut
-        print(f"Erreur lors de la génération de la réponse IA: {e}")
+        logger = logging.getLogger(__name__)
+        msg = str(e)
+        if "SearchNotEnabled" in msg or "31082" in msg or "requires additional configuration" in msg:
+            logger.warning(f"Erreur lors de la génération de la réponse IA: {e}")
+        else:
+            logger.error(f"Erreur lors de la génération de la réponse IA: {e}")
         answer = "Désolé, une erreur est survenue lors de la génération de la réponse. Veuillez réessayer plus tard."
     
     # Mettre à jour avec la réponse

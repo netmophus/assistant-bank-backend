@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
 
 from app.core.deps import get_current_user
 from app.core.security import create_access_token
@@ -14,9 +15,10 @@ from app.models.user import (
     create_user_for_org,
     list_users,
     list_users_by_org,
+    list_users_by_org_with_filters,
     update_user,
 )
-from app.schemas.user import LoginData, Token, UserCreate, UserPublic, UserUpdate
+from app.schemas.user import LoginData, Token, UserCreate, UserPublic, UserUpdate, StockUserCreate
 
 router = APIRouter(
     prefix="/auth",
@@ -80,6 +82,12 @@ async def login(data: LoginData):
         "sub": str(user["_id"]),
         "email": user["email"],
         "role": user_role,  # Ajouter le rôle dans le JWT
+        "role_departement": user.get(
+            "role_departement", "agent"
+        ),  # Rôle dans le département
+        "department_id": str(user["department_id"])
+        if user.get("department_id")
+        else None,
     }
     # Ajouter org seulement si ce n'est pas un super admin
     if org_id:
@@ -139,7 +147,9 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         department_name=department_name,
         service_id=service_id,
         service_name=service_name,
-        role=current_user.get("role", "user"),
+        role=current_user.get("role"),
+        role_departement=current_user.get("role_departement"),
+        is_active=current_user.get("is_active", True),
     )
 
 
@@ -195,11 +205,19 @@ async def create_user_for_organization(
     Crée un utilisateur pour l'organisation de l'admin connecté.
     Vérifie les limites de la licence.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     user_role = current_user.get("role", "user")
     user_org_id = current_user.get("organization_id")
+    
+    logger.info(f"[create_user_for_organization] Début création utilisateur")
+    logger.info(f"[create_user_for_organization] current_user role={user_role}, org_id={user_org_id}")
+    logger.info(f"[create_user_for_organization] user_in={user_in.dict()}")
 
     # Vérifier que l'utilisateur est un admin d'organisation (pas super admin)
     if user_role != "admin" or not user_org_id:
+        logger.warning(f"[create_user_for_organization] Accès refusé: role={user_role}, org_id={user_org_id}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Seuls les administrateurs d'organisation peuvent créer des utilisateurs.",
@@ -207,18 +225,28 @@ async def create_user_for_organization(
 
     # Vérifier que l'utilisateur est créé pour la même organisation
     if str(user_org_id) != user_in.organization_id:
+        logger.warning(f"[create_user_for_organization] Organisation différente: user_org={user_org_id}, user_in.org={user_in.organization_id}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Vous ne pouvez créer des utilisateurs que pour votre propre organisation.",
         )
 
     try:
+        logger.info(f"[create_user_for_organization] Appel create_user_for_org")
         user = await create_user_for_org(user_in, str(user_org_id))
+        logger.info(f"[create_user_for_organization] Utilisateur créé avec succès: {user.get('id')}")
         return user
     except ValueError as e:
+        logger.error(f"[create_user_for_organization] Erreur ValueError: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except Exception as e:
+        logger.error(f"[create_user_for_organization] Erreur inattendue: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la création de l'utilisateur: {str(e)}",
         )
 
 
@@ -239,6 +267,70 @@ async def get_users_for_organization(current_user: dict = Depends(get_current_us
 
     users = await list_users_by_org(str(user_org_id))
     return users
+
+
+@router.get("/users/org/filtered", response_model=list[UserPublic])
+async def get_users_with_filters(
+    department_id: Optional[str] = None,
+    service_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Liste les utilisateurs de l'organisation avec filtres optionnels par département et service.
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    # Vérifier que l'utilisateur est un admin d'organisation (pas super admin)
+    if user_role != "admin" or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seuls les administrateurs d'organisation peuvent voir les utilisateurs.",
+        )
+
+    users = await list_users_by_org_with_filters(str(user_org_id), department_id, service_id)
+    return users
+
+
+@router.get("/users/org/simple")
+async def get_users_for_organization_simple(current_user: dict = Depends(get_current_user)):
+    """
+    Liste simplifiée des utilisateurs de l'organisation pour les permissions.
+    Retourne uniquement les champs nécessaires pour le select dans TabPermissionsTab.
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    # Vérifier que l'utilisateur est un admin d'organisation (pas super admin)
+    if user_role != "admin" or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seuls les administrateurs d'organisation peuvent voir les utilisateurs.",
+        )
+
+    try:
+        users = await list_users_by_org(str(user_org_id))
+        
+        # Retourner uniquement les champs nécessaires
+        # list_users_by_org retourne une List[dict], pas des objets UserPublic
+        return [
+            {
+                "id": user.get("id", ""),
+                "full_name": user.get("full_name", ""),
+                "email": user.get("email", ""),
+                "department_id": user.get("department_id"),
+                "service_id": user.get("service_id"),
+                "role_departement": user.get("role_departement"),
+            }
+            for user in users
+        ]
+    except Exception as e:
+        import traceback
+        error_detail = f"Erreur lors de la récupération des utilisateurs: {str(e)}\n{traceback.format_exc()}"
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_detail,
+        )
 
 
 @router.get("/users/org/stats")
@@ -277,3 +369,197 @@ async def get_org_user_stats(current_user: dict = Depends(get_current_user)):
         "license_plan": license_doc["plan"],
         "license_status": license_doc["status"],
     }
+
+
+@router.post("/users/org/stock", response_model=UserPublic)
+async def create_stock_user(
+    user_in: StockUserCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Crée un gestionnaire de stock ou un agent stock DRH pour l'organisation de l'admin connecté.
+    Rôles acceptés : 'gestionnaire_stock' ou 'agent_stock_drh'
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    # Vérifier que l'utilisateur est un admin d'organisation
+    if user_role != "admin" or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seuls les administrateurs d'organisation peuvent créer des gestionnaires de stock.",
+        )
+
+    # Vérifier que le rôle est valide
+    valid_roles = ["gestionnaire_stock", "agent_stock_drh"]
+    if user_in.role not in valid_roles:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Rôle invalide. Rôles acceptés : {', '.join(valid_roles)}",
+        )
+
+    try:
+        # Créer un UserCreate à partir de StockUserCreate
+        user_create_data = UserCreate(
+            email=user_in.email,
+            full_name=user_in.full_name,
+            password=user_in.password,
+            organization_id=str(user_org_id),
+            department_id=user_in.department_id,
+            role=user_in.role,
+            role_departement=None,  # Pas de rôle département pour les gestionnaires de stock
+        )
+
+        user = await create_user_for_org(user_create_data, str(user_org_id))
+        return user
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la création: {str(e)}",
+        )
+
+
+@router.get("/users/org/stock", response_model=list[UserPublic])
+async def get_stock_users(current_user: dict = Depends(get_current_user)):
+    """
+    Liste les gestionnaires de stock et agents stock DRH de l'organisation de l'admin connecté.
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    # Vérifier que l'utilisateur est un admin d'organisation
+    if user_role != "admin" or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seuls les administrateurs d'organisation peuvent voir les gestionnaires de stock.",
+        )
+
+    try:
+        # Récupérer tous les utilisateurs de l'organisation
+        all_users = await list_users_by_org(str(user_org_id))
+        
+        # Filtrer pour ne garder que les gestionnaires de stock et agents DRH
+        stock_users = [
+            user for user in all_users
+            if user.get("role") in ["gestionnaire_stock", "agent_stock_drh"]
+        ]
+        
+        return stock_users
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la récupération: {str(e)}",
+        )
+
+
+@router.put("/users/org/{user_id}", response_model=UserPublic)
+async def update_user_for_organization(
+    user_id: str,
+    user_update: UserUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Met à jour un utilisateur de l'organisation de l'admin connecté.
+    Permet de modifier les informations et de désactiver/réactiver l'utilisateur.
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    # Vérifier que l'utilisateur est un admin d'organisation
+    if user_role != "admin" or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seuls les administrateurs d'organisation peuvent modifier des utilisateurs.",
+        )
+
+    try:
+        # Vérifier que l'utilisateur à modifier appartient à la même organisation
+        from app.models.user import get_user_by_id
+        target_user = await get_user_by_id(user_id)
+        if not target_user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Utilisateur introuvable.",
+            )
+        
+        target_org_id = target_user.get("organization_id")
+        if not target_org_id or str(target_org_id) != str(user_org_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vous ne pouvez modifier que les utilisateurs de votre organisation.",
+            )
+
+        # Ne pas permettre de modifier le rôle en superadmin ou admin via cet endpoint
+        update_data = user_update.model_dump(exclude_unset=True)
+        if "role" in update_data and update_data["role"] in ["superadmin", "admin"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vous ne pouvez pas modifier le rôle en superadmin ou admin.",
+            )
+
+        # Ne pas permettre de changer l'organization_id
+        if "organization_id" in update_data:
+            del update_data["organization_id"]
+
+        # Mettre à jour l'utilisateur
+        updated_user = await update_user(user_id, update_data)
+        return updated_user
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la mise à jour: {str(e)}",
+        )
+
+
+@router.post("/forgot-password")
+async def forgot_password(data: dict):
+    """
+    Envoie un email de réinitialisation du mot de passe
+    """
+    email = data.get("email")
+    
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="L'email est requis",
+        )
+    
+    try:
+        # Vérifier si l'utilisateur existe
+        from app.models.user import get_user_by_email
+        user = await get_user_by_email(email)
+        
+        if not user:
+            # Pour des raisons de sécurité, ne pas révéler si l'email existe ou non
+            return {"message": "Si l'email existe, un lien de réinitialisation a été envoyé"}
+        
+        # TODO: Implémenter l'envoi d'email avec le lien de réinitialisation
+        # Pour le moment, on simule l'envoi
+        import secrets
+        token = secrets.token_urlsafe(32)
+        
+        # Ici vous devriez implémenter l'envoi d'email réel
+        # Par exemple avec sendgrid, mailgun, ou autre service SMTP
+        
+        return {
+            "message": "Si l'email existe, un lien de réinitialisation a été envoyé",
+            "token": token  # Pour le développement uniquement
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de l'envoi de l'email: {str(e)}",
+        )

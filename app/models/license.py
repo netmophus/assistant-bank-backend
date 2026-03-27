@@ -1,12 +1,14 @@
 from datetime import datetime, date
 from typing import List, Optional
-
+import logging
 
 from bson import ObjectId
 
 from app.core.db import get_database
 from app.models.organization import get_organization_by_id
 from app.schemas.license import LicenseCreate
+
+logger = logging.getLogger(__name__)
 
 LICENSES_COLLECTION = "licenses"
 
@@ -72,9 +74,13 @@ async def list_licenses_by_org(org_id: str) -> List[dict]:
     try:
         org_oid = ObjectId(org_id)
     except Exception:
-        return []
+        org_oid = None
 
-    cursor = db[LICENSES_COLLECTION].find({"organization_id": org_oid})
+    q = {"organization_id": org_id}
+    if org_oid is not None:
+        q = {"$or": [{"organization_id": org_oid}, {"organization_id": org_id}]}
+
+    cursor = db[LICENSES_COLLECTION].find(q)
     items = []
     async for doc in cursor:
         items.append(_license_doc_to_public(doc))
@@ -94,22 +100,51 @@ async def get_active_license_for_org(org_id: str) -> Optional[dict]:
     try:
         org_oid = ObjectId(org_id)
     except Exception:
-        return None
+        org_oid = None
 
     # Convert date.today() to datetime for MongoDB compatibility
     today = datetime.combine(date.today(), datetime.min.time())
 
-    doc = await db[LICENSES_COLLECTION].find_one(
-        {
-            "organization_id": org_oid,
-            "status": "active",
-            "start_date": {"$lte": today},
-            "end_date": {"$gte": today},
-        }
-    )
+    q = {
+        "status": "active",
+        "start_date": {"$lte": today},
+        "end_date": {"$gte": today},
+    }
+    if org_oid is not None:
+        q["$or"] = [{"organization_id": org_oid}, {"organization_id": org_id}]
+    else:
+        q["organization_id"] = org_id
+
+    doc = await db[LICENSES_COLLECTION].find_one(q)
     if not doc:
         return None
     return _license_doc_to_public(doc)
+
+
+async def org_has_active_license(org_id: Optional[str]) -> bool:
+    """
+    Vérifie si une organisation a une licence active.
+    
+    Args:
+        org_id: ID de l'organisation (None pour superadmin)
+    
+    Returns:
+        True si licence active, False sinon.
+        Retourne True si org_id est None (superadmin).
+    """
+    if not org_id:
+        logger.debug("org_has_active_license: org_id=None (superadmin) → True")
+        return True  # Superadmins ont toujours accès
+    
+    license_doc = await get_active_license_for_org(org_id)
+    has_license = license_doc is not None
+    
+    if has_license:
+        logger.debug(f"org_has_active_license: org_id={org_id} → True (licence active trouvée)")
+    else:
+        logger.debug(f"org_has_active_license: org_id={org_id} → False (pas de licence active)")
+    
+    return has_license
 
 
 async def update_license(license_id: str, update_data: dict) -> dict:

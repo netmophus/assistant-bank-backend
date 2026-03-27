@@ -1,3 +1,15 @@
+"""Schémas Pydantic: Formations.
+
+Ces schémas définissent le contrat JSON (API) entre frontend et backend.
+
+Points clés:
+- `Partie.contenu` correspond au *prompt* saisi par l'admin (matière première IA).
+- `contenu_genere` correspond au contenu généré automatiquement (IA) et stocké.
+- `status` permet de distinguer:
+  - `draft`: brouillon (saisie en cours)
+  - `published`: publié (visible côté user)
+"""
+
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
@@ -18,6 +30,7 @@ class PartiePublic(PartieBase):
 
 
 class ChapitreBase(BaseModel):
+    titre: str = Field(default="", example="Chapitre 1: Notions clés")
     introduction: str = Field(default="", description="Introduction du chapitre")
     nombre_parties: int = Field(default=0, ge=0, description="Nombre de parties dans ce chapitre")
     contenu_genere: Optional[str] = Field(None, description="Contenu généré par l'IA")
@@ -56,7 +69,7 @@ class FormationBase(BaseModel):
 
 
 class FormationCreate(FormationBase):
-    organization_id: str = Field(..., description="ID de l'organisation")
+    organization_id: Optional[str] = Field(None, description="ID de l'organisation")
     modules: List[ModuleCreate] = Field(default_factory=list)
     status: Optional[str] = Field("draft", description="Statut de la formation (draft par défaut)")
 

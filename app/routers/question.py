@@ -24,7 +24,7 @@ async def ask_question(
     Pose une question à l'IA.
     Vérifie le quota mensuel (60 questions/mois).
     """
-    user_id = str(current_user["_id"])
+    user_id = str(current_user.get("id"))
 
     # Vérifier le quota avant de créer la question
     can_ask, stats = await check_user_quota(user_id)

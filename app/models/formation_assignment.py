@@ -32,6 +32,15 @@ async def assign_formation_to_departments(formation_id: str, department_ids: Lis
     if formation.get("status") != "published":
         raise ValueError("Seules les formations publiées peuvent être affectées aux départements.")
     
+    # Vérifier que tous les départements appartiennent à la même organisation
+    for dept_oid in dept_oids:
+        dept_doc = await db["departments"].find_one({
+            "_id": dept_oid,
+            "organization_id": org_oid
+        })
+        if not dept_doc:
+            raise ValueError(f"Département {str(dept_oid)} introuvable ou n'appartient pas à votre organisation.")
+    
     # Supprimer les anciennes affectations pour cette formation
     await db[FORMATIONS_ASSIGNMENTS_COLLECTION].delete_many({
         "formation_id": formation_oid
@@ -58,9 +67,10 @@ async def assign_formation_to_departments(formation_id: str, department_ids: Lis
     }
 
 
-async def get_formations_for_department(department_id: str) -> List[dict]:
+async def get_formations_for_department(department_id: str, organization_id: Optional[str] = None) -> List[dict]:
     """
     Récupère toutes les formations affectées à un département.
+    Si organization_id est fourni, filtre également par organisation.
     Retourne uniquement les IDs des formations (pour compatibilité).
     Pour obtenir les détails complets, utilisez get_formation_by_id avec chaque ID.
     """
@@ -71,9 +81,18 @@ async def get_formations_for_department(department_id: str) -> List[dict]:
     except Exception:
         return []
     
+    # Construire la requête
+    query = {"department_id": dept_oid}
+    if organization_id:
+        try:
+            org_oid = ObjectId(organization_id)
+            query["organization_id"] = org_oid
+        except Exception:
+            pass
+    
     # Récupérer les affectations
     assignments = []
-    async for assignment in db[FORMATIONS_ASSIGNMENTS_COLLECTION].find({"department_id": dept_oid}):
+    async for assignment in db[FORMATIONS_ASSIGNMENTS_COLLECTION].find(query):
         assignments.append(assignment)
     
     # Récupérer les IDs des formations

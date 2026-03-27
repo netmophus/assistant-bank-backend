@@ -60,6 +60,8 @@ async def list_organizations() -> List[dict]:
     cursor = db[ORGANIZATIONS_COLLECTION].find({})
     orgs = []
     async for doc in cursor:
+        if "name" not in doc or "code" not in doc:
+            continue
         orgs.append(_org_doc_to_public(doc))
     return orgs
 

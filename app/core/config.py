@@ -22,6 +22,11 @@ class Settings:
     
     # Limites d'utilisation IA par défaut
     AI_DAILY_LIMIT_PER_ORG: int = int(os.getenv("AI_DAILY_LIMIT_PER_ORG", "50"))
+    
+    # Configuration L'Africa Mobile SMS (https://developers.lafricamobile.com)
+    LAM_ACCOUNT_ID: str = os.getenv("LAM_ACCOUNT_ID", "")
+    LAM_PASSWORD: str = os.getenv("LAM_PASSWORD", "")
+    LAM_SENDER: str = os.getenv("LAM_SENDER", "SOFTLINK")
 
 
 settings = Settings()

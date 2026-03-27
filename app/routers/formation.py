@@ -1,3 +1,21 @@
+"""Routes FastAPI: Formations.
+
+Ce routeur regroupe toute l'API "formation".
+
+Vue d'ensemble du flux:
+- Admin org:
+  - CRUD (create/list/get/update)
+  - Sauvegarde en brouillon (status=draft)
+  - Publication (status=published) avec options IA:
+    - `auto_generate_content`: génère `contenu_genere` pour les chapitres
+    - `auto_generate_qcm`: génère `questions_qcm` au niveau module
+  - Affectation des formations publiées aux départements
+
+- Utilisateur:
+  - Accès aux formations publiées assignées à son département (ou org)
+  - Endpoints "lecture" / génération ponctuelle (contenu chapitre/partie, suggestions)
+"""
+
 from datetime import datetime
 
 from bson import ObjectId
@@ -35,6 +53,11 @@ router = APIRouter(
 )
 
 
+# -----------------------------------------------------------------------------
+# Admin (organisation): CRUD formation
+# -----------------------------------------------------------------------------
+
+
 @router.post("", response_model=FormationPublic)
 async def create_formation_endpoint(
     formation_in: FormationCreate, current_user: dict = Depends(get_current_user)
@@ -52,8 +75,9 @@ async def create_formation_endpoint(
             detail="Seuls les administrateurs d'organisation peuvent créer des formations.",
         )
 
-    # Vérifier que la formation est créée pour la bonne organisation
-    if formation_in.organization_id != str(user_org_id):
+    # Multi-org: on ne fait pas confiance au client. L'organisation est déduite du token.
+    # Si le client envoie un organization_id différent, on refuse.
+    if formation_in.organization_id and formation_in.organization_id != str(user_org_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Vous ne pouvez créer des formations que pour votre propre organisation.",
@@ -61,6 +85,7 @@ async def create_formation_endpoint(
 
     try:
         formation_data = formation_in.model_dump()
+        formation_data["organization_id"] = str(user_org_id)
         formation = await create_formation(formation_data, str(user_org_id))
         return formation
     except ValueError as e:
@@ -152,6 +177,10 @@ async def update_formation_endpoint(
         )
 
 
+# -----------------------------------------------------------------------------
+# Utilisateur: accès aux formations (publiées) de son organisation/département
+# -----------------------------------------------------------------------------
+
 @router.get("/user/my-formations", response_model=list[FormationPublic])
 async def get_my_formations(current_user: dict = Depends(get_current_user)):
     """
@@ -171,12 +200,14 @@ async def get_my_formations(current_user: dict = Depends(get_current_user)):
 
     # Si l'utilisateur a un département, récupérer les formations assignées à ce département
     if user_dept_id:
-        # Récupérer les IDs des formations assignées au département
-        assigned_formations = await get_formations_for_department(user_dept_id)
+        # Récupérer les IDs des formations assignées au département ET de l'organisation
+        assigned_formations = await get_formations_for_department(str(user_dept_id), str(user_org_id))
         formation_ids = [f["id"] for f in assigned_formations]
 
         if not formation_ids:
-            return []
+            formations = await list_formations_by_org(str(user_org_id))
+            published_formations = [f for f in formations if f.get("status") == "published"]
+            return published_formations
 
         # Récupérer les formations complètes avec tous leurs détails (modules, chapitres, contenu généré, QCM)
         formations = []
@@ -194,6 +225,10 @@ async def get_my_formations(current_user: dict = Depends(get_current_user)):
         published_formations = [f for f in formations if f.get("status") == "published"]
         return published_formations
 
+
+# -----------------------------------------------------------------------------
+# Admin: publication + génération IA optionnelle (contenu / QCM)
+# -----------------------------------------------------------------------------
 
 @router.post("/{formation_id}/publish", response_model=FormationPublic)
 async def publish_formation(
@@ -245,6 +280,7 @@ async def publish_formation(
                                     parties=parties,
                                     formation_titre=formation.get("titre", ""),
                                     module_titre=module.get("titre", ""),
+                                    chapitre_titre=chapitre.get("titre", ""),
                                 )
 
                                 # Mettre à jour dans la base de données
@@ -327,6 +363,10 @@ async def publish_formation(
         )
 
 
+# -----------------------------------------------------------------------------
+# Admin: affectation des formations publiées aux départements
+# -----------------------------------------------------------------------------
+
 @router.post("/{formation_id}/assign-departments")
 async def assign_formation_to_departments_endpoint(
     formation_id: str,
@@ -383,6 +423,10 @@ async def get_assigned_departments(
     return {"formation_id": formation_id, "department_ids": department_ids}
 
 
+# -----------------------------------------------------------------------------
+# Utilisateur: endpoints IA "à la demande" en lecture (générer contenu / suggérer)
+# -----------------------------------------------------------------------------
+
 @router.post(
     "/{formation_id}/modules/{module_id}/chapitres/{chapitre_id}/generate-content-user"
 )
@@ -410,7 +454,7 @@ async def generate_chapitre_content_user_endpoint(
 
     # Vérifier que l'utilisateur a un département et que la formation est assignée à ce département
     if user_dept_id:
-        assigned_formations = await get_formations_for_department(user_dept_id)
+        assigned_formations = await get_formations_for_department(str(user_dept_id), str(user_org_id))
         formation_ids = [f["id"] for f in assigned_formations]
         if formation_id not in formation_ids:
             raise HTTPException(
@@ -473,6 +517,7 @@ async def generate_chapitre_content_user_endpoint(
             parties=parties,
             formation_titre=formation.get("titre", ""),
             module_titre=module.get("titre", ""),
+            chapitre_titre=chapitre.get("titre", ""),
         )
 
         # Mettre à jour dans la base de données (lecture seule pour les utilisateurs, on retourne juste le contenu)
@@ -515,7 +560,7 @@ async def get_chapter_question_suggestions_endpoint(
 
     # Vérifier que la formation est assignée au département de l'utilisateur
     if user_dept_id:
-        assigned_formations = await get_formations_for_department(user_dept_id)
+        assigned_formations = await get_formations_for_department(str(user_dept_id), str(user_org_id))
         formation_ids = [f["id"] for f in assigned_formations]
         if formation_id not in formation_ids:
             raise HTTPException(
@@ -591,7 +636,7 @@ async def generate_partie_content_user_endpoint(
 
     # Vérifier que la formation est assignée au département de l'utilisateur
     if user_dept_id:
-        assigned_formations = await get_formations_for_department(user_dept_id)
+        assigned_formations = await get_formations_for_department(str(user_dept_id), str(user_org_id))
         formation_ids = [f["id"] for f in assigned_formations]
         if formation_id not in formation_ids:
             raise HTTPException(
@@ -745,7 +790,7 @@ async def ask_chapitre_question_endpoint(
 
     # Vérifier que la formation est assignée au département de l'utilisateur
     if user_dept_id:
-        assigned_formations = await get_formations_for_department(user_dept_id)
+        assigned_formations = await get_formations_for_department(str(user_dept_id), str(user_org_id))
         formation_ids = [f["id"] for f in assigned_formations]
         if formation_id not in formation_ids:
             raise HTTPException(
@@ -972,6 +1017,7 @@ async def generate_chapitre_content_endpoint(
         parties=parties,
         formation_titre=formation.get("titre", ""),
         module_titre=module.get("titre", ""),
+        chapitre_titre=chapitre.get("titre", ""),
     )
 
     # Sauvegarder le contenu généré dans le chapitre

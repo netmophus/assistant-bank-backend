@@ -34,3 +34,34 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
     # Convertir le document MongoDB en format public avec "id" au lieu de "_id"
     return _user_doc_to_public(user)
+
+
+async def get_org_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """
+    Vérifie que l'utilisateur est un administrateur d'organisation.
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+    
+    if user_role != "admin" or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé aux administrateurs d'organisation.",
+        )
+    
+    return current_user
+
+
+async def get_superadmin(current_user: dict = Depends(get_current_user)) -> dict:
+    """
+    Vérifie que l'utilisateur est un super administrateur.
+    """
+    user_role = current_user.get("role", "user")
+    
+    if user_role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé aux super administrateurs.",
+        )
+    
+    return current_user

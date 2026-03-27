@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from typing import List
 
 from app.schemas.stock.consommable import ConsommableCreate, ConsommablePublic, ConsommableUpdate, StockUpdate
+from app.schemas.stock.validation_consommable import ConsommableModificationRequestPublic
 from app.models.stock.consommable import (
     create_consommable,
     list_consommables_by_org,
@@ -21,27 +22,59 @@ router = APIRouter(
 )
 
 
-@router.post("", response_model=ConsommablePublic)
+@router.post("", response_model=ConsommablePublic, status_code=status.HTTP_201_CREATED)
 async def create_consommable_endpoint(
     consommable_in: ConsommableCreate,
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Crée un consommable pour l'organisation de l'admin connecté.
+    Crée un consommable pour l'organisation.
+    - Admin : création directe
+    - Gestionnaire de stock : crée une demande de validation
     """
     user_role = current_user.get("role", "user")
+    user_id = current_user.get("id")
     user_org_id = current_user.get("organization_id")
     
-    if user_role != "admin" or not user_org_id:
+    if user_role not in ["admin", "gestionnaire_stock"] or not user_org_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Seuls les administrateurs d'organisation peuvent créer des consommables.",
+            detail="Seuls les administrateurs d'organisation et les gestionnaires de stock peuvent créer des consommables.",
         )
     
     try:
         consommable_data = consommable_in.model_dump()
-        consommable = await create_consommable(consommable_data, str(user_org_id))
-        return consommable
+        
+        # Si admin : création directe
+        if user_role == "admin":
+            consommable = await create_consommable(consommable_data, str(user_org_id))
+            return consommable
+        
+        # Si gestionnaire de stock : créer une demande de validation
+        from app.models.stock.validation_consommable import create_validation_consommable_request
+        
+        request_data = {
+            "action": "create",
+            "consommable_data": consommable_data,
+            "motif": None,
+        }
+        
+        validation_request = await create_validation_consommable_request(
+            request_data, str(user_id), str(user_org_id)
+        )
+        
+        # Retourner une erreur avec le statut 202 pour indiquer que la demande est en attente
+        # Le frontend devra gérer ce cas spécial
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "message": "Demande de création de consommable créée. Elle sera validée par l'agent DRH.",
+                "validation_request": validation_request
+            }
+        )
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -59,15 +92,15 @@ async def list_consommables_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Liste toutes les consommables de l'organisation (admin uniquement).
+    Liste toutes les consommables de l'organisation (admin, gestionnaire de stock et agent DRH).
     """
     user_role = current_user.get("role", "user")
     user_org_id = current_user.get("organization_id")
     
-    if user_role != "admin" or not user_org_id:
+    if user_role not in ["admin", "gestionnaire_stock", "agent_stock_drh"] or not user_org_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Seuls les administrateurs peuvent voir toutes les consommables.",
+            detail="Seuls les administrateurs, gestionnaires de stock et agents DRH peuvent voir toutes les consommables.",
         )
     
     try:
@@ -170,14 +203,17 @@ async def update_consommable_endpoint(
 ):
     """
     Met à jour un consommable.
+    - Admin : modification directe
+    - Gestionnaire de stock : crée une demande de validation
     """
     user_role = current_user.get("role", "user")
+    user_id = current_user.get("id")
     user_org_id = current_user.get("organization_id")
     
-    if user_role != "admin" or not user_org_id:
+    if user_role not in ["admin", "gestionnaire_stock"] or not user_org_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Seuls les administrateurs peuvent modifier des consommables.",
+            detail="Seuls les administrateurs et les gestionnaires de stock peuvent modifier des consommables.",
         )
     
     try:
@@ -195,15 +231,40 @@ async def update_consommable_endpoint(
             )
         
         update_data = {k: v for k, v in consommable_in.model_dump().items() if v is not None}
-        updated = await update_consommable(consommable_id, update_data)
         
-        if not updated:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Erreur lors de la mise à jour.",
-            )
+        # Si admin : modification directe
+        if user_role == "admin":
+            updated = await update_consommable(consommable_id, update_data)
+            if not updated:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Erreur lors de la mise à jour.",
+                )
+            return updated
         
-        return updated
+        # Si gestionnaire de stock : créer une demande de validation
+        from app.models.stock.validation_consommable import create_validation_consommable_request
+        
+        request_data = {
+            "action": "update",
+            "consommable_id": consommable_id,
+            "consommable_data": update_data,
+            "motif": None,
+        }
+        
+        validation_request = await create_validation_consommable_request(
+            request_data, str(user_id), str(user_org_id)
+        )
+        
+        # Retourner une réponse avec le statut 202 pour indiquer que la demande est en attente
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "message": "Demande de modification de consommable créée. Elle sera validée par l'agent DRH.",
+                "validation_request": validation_request
+            }
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -220,15 +281,20 @@ async def update_stock_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Met à jour le stock d'un consommable.
+    Crée une demande d'introduction de stock (nécessite validation DRH).
+    Le stock ne sera mis à jour qu'après validation par le DRH.
     """
+    from app.models.stock.introduction_stock import create_introduction_stock
+    
     user_role = current_user.get("role", "user")
+    user_id = current_user.get("id")
     user_org_id = current_user.get("organization_id")
     
-    if user_role != "admin" or not user_org_id:
+    # Vérifier que l'utilisateur est gestionnaire de stock ou admin
+    if user_role not in ["admin", "gestionnaire_stock"] or not user_org_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Seuls les administrateurs peuvent modifier le stock.",
+            detail="Seuls les gestionnaires de stock peuvent introduire du stock.",
         )
     
     try:
@@ -245,21 +311,26 @@ async def update_stock_endpoint(
                 detail="Vous ne pouvez modifier que le stock de votre organisation.",
             )
         
-        updated = await update_stock(consommable_id, stock_update.quantite, stock_update.operation)
+        # Créer une demande d'introduction de stock (en attente de validation DRH)
+        introduction_data = {
+            "consommable_id": consommable_id,
+            "gestionnaire_id": str(user_id),
+            "organization_id": str(user_org_id),
+            "quantite": stock_update.quantite,
+            "operation": stock_update.operation,
+            "motif": f"Introduction de stock - {stock_update.operation}",
+        }
         
-        if not updated:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Erreur lors de la mise à jour du stock.",
-            )
+        introduction = await create_introduction_stock(introduction_data)
         
-        return updated
+        # Retourner le consommable (le stock n'est pas encore mis à jour)
+        return consommable
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la mise à jour: {str(e)}",
+            detail=f"Erreur lors de la création de la demande d'introduction: {str(e)}",
         )
 
 
@@ -269,15 +340,15 @@ async def delete_consommable_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Supprime un consommable.
+    Supprime un consommable (admin ou gestionnaire de stock).
     """
     user_role = current_user.get("role", "user")
     user_org_id = current_user.get("organization_id")
     
-    if user_role != "admin" or not user_org_id:
+    if user_role not in ["admin", "gestionnaire_stock"] or not user_org_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Seuls les administrateurs peuvent supprimer des consommables.",
+            detail="Seuls les administrateurs et les gestionnaires de stock peuvent supprimer des consommables.",
         )
     
     try:

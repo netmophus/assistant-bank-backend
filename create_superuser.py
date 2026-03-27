@@ -26,11 +26,11 @@ async def create_superuser(email: str, password: str, full_name: str, force_upda
     # Vérifier si l'utilisateur existe déjà
     existing_user = await db[USERS_COLLECTION].find_one({"email": email})
     if existing_user:
-        print(f"⚠ L'utilisateur avec l'email '{email}' existe déjà.")
+        print(f"[INFO] L'utilisateur avec l'email '{email}' existe deja.")
         if not force_update:
-            response = input("Voulez-vous réinitialiser son mot de passe? (o/n): ")
+            response = input("Voulez-vous reinitialiser son mot de passe? (o/n): ")
             if response.lower() != 'o':
-                print("Annulé.")
+                print("Annule.")
                 return None
         
         # Mettre à jour le mot de passe et s'assurer que organization_id est None pour super admin
@@ -45,9 +45,9 @@ async def create_superuser(email: str, password: str, full_name: str, force_upda
                 "updated_at": datetime.utcnow()
             }}
         )
-        print(f"✓ Mot de passe de l'utilisateur '{email}' mis à jour.")
-        print(f"✓ Rôle défini comme 'superadmin'.")
-        print(f"✓ Organization_id mis à None (super admin).")
+        print(f"[OK] Mot de passe de l'utilisateur '{email}' mis a jour.")
+        print(f"[OK] Role defini comme 'superadmin'.")
+        print(f"[OK] Organization_id mis a None (super admin).")
         return existing_user["_id"]
     
     # Le super admin n'est PAS lié à une organisation
@@ -68,7 +68,7 @@ async def create_superuser(email: str, password: str, full_name: str, force_upda
     user_id = result.inserted_id
     
     print(f"\n{'='*60}")
-    print(f"✓ Super utilisateur créé avec succès!")
+    print(f"[OK] Super utilisateur cree avec succes!")
     print(f"{'='*60}")
     print(f"Email: {email}")
     print(f"Nom: {full_name}")
@@ -101,7 +101,7 @@ async def main():
         email = input("Email du super utilisateur: ").strip()
     
     if not email:
-        print("❌ L'email est requis.")
+        print("[ERREUR] L'email est requis.")
         sys.exit(1)
     
     if args.password:
@@ -111,11 +111,11 @@ async def main():
         password = getpass.getpass("Mot de passe: ").strip()
     
     if not password:
-        print("❌ Le mot de passe est requis.")
+        print("[ERREUR] Le mot de passe est requis.")
         sys.exit(1)
     
     if len(password) < 6:
-        print("❌ Le mot de passe doit contenir au moins 6 caractères.")
+        print("[ERREUR] Le mot de passe doit contenir au moins 6 caracteres.")
         sys.exit(1)
     
     if args.name:
@@ -129,7 +129,7 @@ async def main():
     try:
         await create_superuser(email, password, full_name, force_update=args.force)
     except Exception as e:
-        print(f"\n❌ Erreur lors de la création: {str(e)}")
+        print(f"\n[ERREUR] Erreur lors de la creation: {str(e)}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

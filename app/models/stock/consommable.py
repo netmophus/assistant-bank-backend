@@ -53,9 +53,9 @@ async def create_consommable(consommable_data: dict, org_id: str) -> dict:
 
     consommable_doc = {
         "type": consommable_data.get("type"),
-        "description": consommable_data.get("description", ""),
-        "unite_base": consommable_data.get("unite_base", "unité"),
-        "unite_conteneur": consommable_data.get("unite_conteneur", "unité"),
+        "description": "",  # Simplification : pas de description
+        "unite_base": "unité",  # Valeur fixe simplifiée
+        "unite_conteneur": "conteneur",  # Valeur fixe simplifiée
         "quantite_par_conteneur": consommable_data.get("quantite_par_conteneur", 1),
         "quantite_stock_conteneur": consommable_data.get("quantite_stock_conteneur", 0),
         "limite_alerte": consommable_data.get("limite_alerte", 0),
@@ -139,12 +139,6 @@ async def update_consommable(
 
     if "type" in consommable_data:
         update_data["type"] = consommable_data["type"]
-    if "description" in consommable_data:
-        update_data["description"] = consommable_data.get("description", "")
-    if "unite_base" in consommable_data:
-        update_data["unite_base"] = consommable_data["unite_base"]
-    if "unite_conteneur" in consommable_data:
-        update_data["unite_conteneur"] = consommable_data["unite_conteneur"]
     if "quantite_par_conteneur" in consommable_data:
         update_data["quantite_par_conteneur"] = consommable_data[
             "quantite_par_conteneur"
@@ -180,12 +174,12 @@ async def update_stock(
     db = get_database()
     try:
         consommable_oid = ObjectId(consommable_id)
-    except Exception:
-        return None
+    except Exception as e:
+        raise ValueError(f"ID consommable invalide: {str(e)}")
 
     consommable = await db[CONSOMMABLES_COLLECTION].find_one({"_id": consommable_oid})
     if not consommable:
-        return None
+        raise ValueError("Consommable introuvable.")
 
     current_stock = consommable.get("quantite_stock_conteneur", 0)
 
@@ -196,7 +190,7 @@ async def update_stock(
     elif operation == "subtract":
         new_stock = max(0, current_stock - quantite)  # Ne pas aller en négatif
     else:
-        return None
+        raise ValueError(f"Opération invalide: {operation}")
 
     result = await db[CONSOMMABLES_COLLECTION].update_one(
         {"_id": consommable_oid},
@@ -208,14 +202,16 @@ async def update_stock(
         },
     )
 
-    if result.modified_count > 0:
-        updated_doc = await db[CONSOMMABLES_COLLECTION].find_one(
-            {"_id": consommable_oid}
-        )
-        if updated_doc:
-            return _consommable_doc_to_public(updated_doc)
+    if result.modified_count == 0:
+        raise ValueError("Erreur lors de la mise à jour du stock (aucune modification).")
 
-    return None
+    updated_doc = await db[CONSOMMABLES_COLLECTION].find_one(
+        {"_id": consommable_oid}
+    )
+    if updated_doc:
+        return _consommable_doc_to_public(updated_doc)
+
+    raise ValueError("Erreur lors de la récupération du consommable mis à jour.")
 
 
 async def delete_consommable(consommable_id: str) -> bool:

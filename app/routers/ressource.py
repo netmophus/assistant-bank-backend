@@ -132,15 +132,28 @@ async def get_user_ressources_endpoint(
 ):
     """
     Récupère les ressources assignées au département de l'utilisateur connecté.
+    Filtre uniquement avec current_user.organization_id + current_user.department_id (sans paramètre).
     """
+    user_org_id = current_user.get("organization_id")
     user_dept_id = current_user.get("department_id")
     
-    if not user_dept_id:
+    # Si pas d'organisation ou pas de département, retourner liste vide
+    if not user_org_id or not user_dept_id:
         return []
     
     try:
+        # Récupérer uniquement les ressources assignées au département de l'utilisateur
+        # La fonction get_ressources_for_department filtre déjà par département
         ressources = await get_ressources_for_department(str(user_dept_id))
-        return ressources
+        
+        # Vérification supplémentaire : s'assurer que toutes les ressources appartiennent à l'organisation de l'utilisateur
+        # (protection contre les cas où une ressource pourrait être assignée à un département d'une autre org)
+        filtered_ressources = [
+            r for r in ressources 
+            if r.get("organization_id") == str(user_org_id)
+        ]
+        
+        return filtered_ressources
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -175,17 +188,26 @@ async def get_ressource_endpoint(
             ressource["departments"] = departments
             return ressource
         
-        # User peut voir seulement les ressources de son département
+        # User peut voir seulement les ressources assignées à son département ET de son organisation
         if user_dept_id:
+            # Vérifier d'abord que la ressource appartient à l'organisation de l'utilisateur
+            if ressource["organization_id"] != str(user_org_id):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Vous n'avez pas accès à cette ressource.",
+                )
+            
+            # Vérifier que la ressource est assignée au département de l'utilisateur
             departments = await get_departments_for_ressource(ressource_id)
             dept_ids = [d["id"] for d in departments]
             if str(user_dept_id) in dept_ids:
                 ressource["departments"] = departments
                 return ressource
         
+        # Si pas de département ou ressource non assignée au département
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Vous n'avez pas accès à cette ressource.",
+            detail="Vous n'avez pas accès à cette ressource. Elle n'est pas assignée à votre département.",
         )
     except HTTPException:
         raise
@@ -223,12 +245,14 @@ async def download_ressource_endpoint(
         if user_role == "admin" and ressource["organization_id"] == str(user_org_id):
             has_access = True
         
-        # User peut télécharger seulement les ressources de son département
+        # User peut télécharger seulement les ressources assignées à son département ET de son organisation
         if not has_access and user_dept_id:
-            departments = await get_departments_for_ressource(ressource_id)
-            dept_ids = [d["id"] for d in departments]
-            if str(user_dept_id) in dept_ids:
-                has_access = True
+            # Vérifier d'abord que la ressource appartient à l'organisation de l'utilisateur
+            if ressource["organization_id"] == str(user_org_id):
+                departments = await get_departments_for_ressource(ressource_id)
+                dept_ids = [d["id"] for d in departments]
+                if str(user_dept_id) in dept_ids:
+                    has_access = True
         
         if not has_access:
             raise HTTPException(
@@ -437,7 +461,13 @@ async def assign_ressource_to_departments_endpoint(
                 detail="Vous ne pouvez affecter que les ressources de votre organisation.",
             )
         
-        success = await assign_ressource_to_departments(ressource_id, assignment.department_ids)
+        try:
+            success = await assign_ressource_to_departments(ressource_id, assignment.department_ids, str(user_org_id))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

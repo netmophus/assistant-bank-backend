@@ -1,3 +1,21 @@
+"""Accès DB (MongoDB) pour les formations.
+
+Ce module contient la logique de persistance des formations dans MongoDB.
+
+Modèle stocké (simplifié):
+- formations:
+  - titre, description, organization_id, status
+  - modules[]:
+    - _id, titre, ordre, chapitres[], questions_qcm[]
+    - chapitres[]:
+      - _id, titre, introduction, ordre, parties[], contenu_genere
+      - parties[]:
+        - _id, titre, contenu (prompt), ordre, contenu_genere
+
+Note: le backend accepte des données partielles (brouillons) et reconstruit la
+structure en générant des ObjectId et des champs `ordre`.
+"""
+
 from datetime import datetime
 from typing import Optional, List
 from bson import ObjectId
@@ -7,6 +25,10 @@ from app.models.organization import get_organization_by_id
 
 FORMATIONS_COLLECTION = "formations"
 
+
+# -----------------------------------------------------------------------------
+# Helpers: conversion "document Mongo" -> "objet public API"
+# -----------------------------------------------------------------------------
 
 def _formation_doc_to_public(doc) -> dict:
     return {
@@ -33,6 +55,7 @@ def _module_doc_to_public(doc) -> dict:
 def _chapitre_doc_to_public(doc) -> dict:
     return {
         "id": str(doc["_id"]),
+        "titre": doc.get("titre", ""),
         "introduction": doc["introduction"],
         "nombre_parties": doc.get("nombre_parties", 0),
         "ordre": doc.get("ordre", 0),
@@ -54,6 +77,11 @@ def _partie_doc_to_public(doc) -> dict:
 async def create_formation(formation_in: dict, org_id: str) -> dict:
     """
     Crée une formation avec sa structure complète (modules, chapitres, parties).
+
+    Important:
+    - Ce endpoint est utilisé aussi pour les brouillons, donc on tolère des champs
+      vides (titres, chapitres/parties inexistants, etc.).
+    - Les IDs (_id) des sous-documents sont générés ici.
     """
     db = get_database()
     
@@ -100,6 +128,7 @@ async def create_formation(formation_in: dict, org_id: str) -> dict:
             # Accepter les chapitres même s'ils sont incomplets (même sans parties)
             chapitres_data.append({
                 "_id": ObjectId(),
+                "titre": chapitre.get("titre", ""),
                 "introduction": chapitre.get("introduction", ""),
                 "nombre_parties": len(parties_data),
                 "ordre": ch_idx + 1,
@@ -144,6 +173,8 @@ async def create_formation(formation_in: dict, org_id: str) -> dict:
 async def list_formations_by_org(org_id: str) -> List[dict]:
     """
     Liste toutes les formations d'une organisation.
+
+    Retourne la structure "publique" (id en str) + modules/chapitres/parties.
     """
     db = get_database()
     try:
@@ -185,6 +216,10 @@ async def get_formation_by_id(formation_id: str) -> Optional[dict]:
 async def update_formation(formation_id: str, update_data: dict, org_id: str) -> dict:
     """
     Met à jour une formation.
+
+    Spécificité:
+    - Si `modules` est fourni, on reconstruit la structure en essayant de
+      préserver les ObjectId existants (pour stabiliser les références côté UI).
     """
     db = get_database()
     try:
@@ -267,6 +302,7 @@ async def update_formation(formation_id: str, update_data: dict, org_id: str) ->
                 
                 chapitres_data.append({
                     "_id": chapitre_id,
+                    "titre": chapitre.get("titre", ""),
                     "introduction": chapitre.get("introduction", ""),
                     "nombre_parties": len(parties_data),
                     "ordre": ch_idx + 1,
