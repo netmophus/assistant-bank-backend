@@ -120,6 +120,81 @@ async def save_escalade_config(organization_id: str, config: dict) -> dict:
     return config
 
 
+# ===================== Sync Attribution Escalade =====================
+
+async def sync_attributions_escalade(organization_id: str) -> dict:
+    """
+    Parcourt tous les snapshots actifs, calcule leur niveau d'escalade
+    et attribue automatiquement les dossiers aux agents configurés sur chaque niveau.
+    Appelée après chaque sauvegarde de la config d'escalade.
+    """
+    db = get_database()
+    try:
+        org_oid = ObjectId(organization_id)
+    except Exception:
+        return {"synced": 0}
+
+    config = await get_escalade_config(organization_id)
+    niveaux = config.get("niveaux", [])
+
+    # Niveaux qui ont un agent_id configuré
+    niveaux_avec_agent = {n["niveau"]: n for n in niveaux if n.get("agent_id")}
+    if not niveaux_avec_agent:
+        return {"synced": 0}
+
+    # Récupérer la date de situation la plus récente
+    from app.models.impayes import get_available_dates_situation, ARREARS_SNAPSHOTS_COLLECTION
+    dates = await get_available_dates_situation(organization_id)
+    if not dates:
+        return {"synced": 0}
+
+    snapshots = await db[ARREARS_SNAPSHOTS_COLLECTION].find({
+        "organization_id": org_oid,
+        "date_situation": dates[0]
+    }).to_list(length=10000)
+
+    # Récupérer les escalades manuelles forcées (ne pas les écraser)
+    escalade_docs = {}
+    async for doc in db[ESCALADE_COLLECTION].find({"organization_id": org_oid}):
+        escalade_docs[doc.get("ref_credit", "")] = doc
+
+    # Grouper les ref_credits par agent_id cible
+    attribution_map: dict = {}  # agent_id → {agent_nom, refs[]}
+
+    for snap in snapshots:
+        ref_credit = snap.get("ref_credit", "")
+        jours_retard = snap.get("jours_retard", 0)
+
+        # Respecter le forçage manuel
+        escalade_manuelle = escalade_docs.get(ref_credit)
+        if escalade_manuelle and escalade_manuelle.get("niveau_force"):
+            niveau_id = escalade_manuelle["niveau_force"]
+        else:
+            niv_info = _determine_niveau_escalade(jours_retard, config)
+            niveau_id = niv_info.get("niveau", "")
+
+        if niveau_id in niveaux_avec_agent:
+            niv = niveaux_avec_agent[niveau_id]
+            agent_id = niv["agent_id"]
+            agent_nom = niv.get("agent_nom", "Agent")
+            if agent_id not in attribution_map:
+                attribution_map[agent_id] = {"agent_nom": agent_nom, "refs": []}
+            attribution_map[agent_id]["refs"].append(ref_credit)
+
+    total_synced = 0
+    for agent_id, info in attribution_map.items():
+        if info["refs"]:
+            await attribuer_credits_agent(
+                organization_id=organization_id,
+                agent_id=agent_id,
+                agent_nom=info["agent_nom"],
+                ref_credits=info["refs"],
+            )
+            total_synced += len(info["refs"])
+
+    return {"synced": total_synced, "agents": len(attribution_map)}
+
+
 # ===================== Escalade Dossiers =====================
 
 def _determine_niveau_escalade(jours_retard: int, config: dict) -> dict:
@@ -327,17 +402,42 @@ async def escalader_manuellement(
             "updated_at": now
         })
 
+    # Attribution automatique si le niveau a un agent_id configuré
+    config = await get_escalade_config(organization_id)
+    niveau_config = next(
+        (n for n in config.get("niveaux", []) if n.get("niveau") == nouveau_niveau),
+        None
+    )
+    agent_attribue_nom = None
+    if niveau_config and niveau_config.get("agent_id"):
+        agent_id_cible = niveau_config["agent_id"]
+        agent_nom_cible = niveau_config.get("agent_nom", "Agent")
+        agent_attribue_nom = agent_nom_cible
+        await attribuer_credits_agent(
+            organization_id=organization_id,
+            agent_id=agent_id_cible,
+            agent_nom=agent_nom_cible,
+            ref_credits=[ref_credit],
+            user_id=user_id,
+            user_nom=user_nom,
+        )
+
     # Ajouter au journal
+    description_journal = f"Escalade manuelle vers {nouveau_niveau}"
+    if agent_attribue_nom:
+        description_journal += f" — dossier attribué à {agent_attribue_nom}"
+    if commentaire:
+        description_journal += f" — {commentaire}"
     await add_journal_entry(
         organization_id=organization_id,
         ref_credit=ref_credit,
         type_action="escalade",
-        description=f"Escalade manuelle vers {nouveau_niveau}" + (f" — {commentaire}" if commentaire else ""),
+        description=description_journal,
         user_id=user_id,
         user_nom=user_nom
     )
 
-    return {"success": True, "ref_credit": ref_credit, "nouveau_niveau": nouveau_niveau}
+    return {"success": True, "ref_credit": ref_credit, "nouveau_niveau": nouveau_niveau, "agent_attribue": agent_attribue_nom}
 
 
 # ===================== Promesses de Paiement =====================
@@ -999,12 +1099,53 @@ async def get_journal(
     if type_action:
         query["type_action"] = type_action
 
-    total = await db[JOURNAL_COLLECTION].count_documents(query)
-    cursor = db[JOURNAL_COLLECTION].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    docs = await cursor.to_list(length=limit)
+    cursor = db[JOURNAL_COLLECTION].find(query).sort("created_at", -1).limit(500)
+    docs = await cursor.to_list(length=500)
+    actions = [_journal_to_public(d) for d in docs]
 
+    # Inclure les SMS envoyés (outbound_messages + sms_history) si on filtre par ref_credit
+    if ref_credit and not type_action:
+        sms_query = {"organization_id": org_oid, "linked_credit": ref_credit}
+
+        # SMS actuels (PENDING/SENT/FAILED)
+        sms_cursor = db[OUTBOUND_MESSAGES_COLLECTION].find(sms_query).sort("created_at", -1).limit(200)
+        sms_docs = await sms_cursor.to_list(length=200)
+
+        # SMS archivés (historique)
+        hist_cursor = db[SMS_HISTORY_COLLECTION].find(sms_query).sort("created_at", -1).limit(200)
+        hist_docs = await hist_cursor.to_list(length=200)
+
+        seen_ids = set()
+        for sms in sms_docs + hist_docs:
+            mid = sms.get("message_id", str(sms.get("_id", "")))
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            created_at = sms.get("created_at")
+            actions.append({
+                "id": str(sms.get("_id", "")),
+                "action_id": mid,
+                "organization_id": organization_id,
+                "ref_credit": ref_credit,
+                "nom_client": None,
+                "type_action": "sms",
+                "description": f"SMS envoyé au {sms.get('to', '—')} — statut : {sms.get('status', '?')}",
+                "corps_sms": sms.get("body", ""),
+                "statut_sms": sms.get("status", ""),
+                "telephone": sms.get("to", ""),
+                "montant": None,
+                "resultat": "succes" if sms.get("status") == "SENT" else ("echec" if sms.get("status") == "FAILED" else "en_attente"),
+                "created_by": None,
+                "created_by_nom": "Système",
+                "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at or ""),
+            })
+
+        # Trier toutes les actions par date décroissante
+        actions.sort(key=lambda a: a.get("created_at", ""), reverse=True)
+
+    total = len(actions)
     return {
-        "actions": [_journal_to_public(d) for d in docs],
+        "actions": actions[skip:skip + limit],
         "total": total
     }
 

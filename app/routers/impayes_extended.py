@@ -28,6 +28,7 @@ from app.models.impayes_extended import (
     get_escalade_config,
     save_escalade_config,
     save_escalade_config_with_validation,
+    sync_attributions_escalade,
     get_escalade_dossiers,
     escalader_manuellement,
     create_promesse,
@@ -84,11 +85,14 @@ async def api_update_escalade_config(
     
     if not success:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail={"errors": errors, "message": "Configuration invalide"}
         )
-    
-    return {"success": True, "config": result}
+
+    # Synchroniser les attributions existantes selon la nouvelle config
+    sync_result = await sync_attributions_escalade(org_id)
+
+    return {"success": True, "config": result, "sync": sync_result}
 
 
 @router.post("/escalade/config/validate")

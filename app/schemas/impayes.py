@@ -535,6 +535,8 @@ class EscaladeNiveauConfig(BaseModel):
     couleur: str = Field(..., description="Couleur d'affichage (format hex)")
     actions_auto: List[str] = Field(default_factory=list, description="Actions automatiques à ce niveau")
     responsable_escalade: Optional[str] = Field(None, description="Personne ou rôle responsable à ce niveau")
+    agent_id: Optional[str] = Field(None, description="ID de l'utilisateur à qui attribuer automatiquement les dossiers à ce niveau")
+    agent_nom: Optional[str] = Field(None, description="Nom de l'utilisateur attribué (cache)")
     actif: bool = Field(True, description="Ce niveau est-il actif ?")
 
     class Config:
