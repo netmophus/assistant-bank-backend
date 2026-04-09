@@ -1215,7 +1215,7 @@ async def get_sms_history_endpoint(
             detail="Vous devez être rattaché à une organisation.",
         )
     
-    history = await get_sms_history(org_id, limit, skip, start_date, end_date)
+    history = await get_sms_history(org_id, limit=limit, skip=skip, start_date=start_date, end_date=end_date)
     return history
 
 
