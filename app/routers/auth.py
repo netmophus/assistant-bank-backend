@@ -135,11 +135,13 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     )
     service_name = None
 
-    # Récupérer le nom de l'organisation si elle existe
+    # Récupérer le nom et le code de l'organisation si elle existe
+    organization_code = None
     if organization_id:
         org = await get_organization_by_id(organization_id)
         if org:
             organization_name = org.get("name")
+            organization_code = org.get("code")
 
     # Récupérer le nom du département si il existe
     if department_id:
@@ -159,6 +161,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         full_name=current_user["full_name"],
         organization_id=organization_id,
         organization_name=organization_name,
+        organization_code=organization_code,
         department_id=department_id,
         department_name=department_name,
         service_id=service_id,

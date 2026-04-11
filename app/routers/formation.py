@@ -1054,3 +1054,176 @@ async def generate_chapitre_content_endpoint(
         "contenu_genere": generated_content,
         "message": "Contenu généré avec succès.",
     }
+
+
+# -----------------------------------------------------------------------------
+# Catalogue global: liste, organisations, affectation
+# -----------------------------------------------------------------------------
+
+async def _is_catalogue_admin(current_user: dict, db) -> bool:
+    """Vérifie que l'utilisateur est admin de l'org CATALOGUE."""
+    if current_user.get("role") != "admin":
+        return False
+    org_id = current_user.get("organization_id")
+    if not org_id:
+        return False
+    org = await db["organizations"].find_one({"_id": ObjectId(str(org_id))})
+    return org is not None and org.get("code") == "CATALOGUE"
+
+
+@router.get("/catalogue/list", response_model=list[FormationPublic])
+async def get_catalogue_formations(current_user: dict = Depends(get_current_user)):
+    """
+    Liste toutes les formations du catalogue global.
+    Accessible à l'admin catalogue et au superadmin.
+    """
+    db = get_database()
+    user_role = current_user.get("role")
+
+    if user_role == "superadmin":
+        pass  # accès total
+    elif not await _is_catalogue_admin(current_user, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé à l'administrateur du catalogue.",
+        )
+
+    catalogue_org = await db["organizations"].find_one({"code": "CATALOGUE"})
+    if not catalogue_org:
+        return []
+
+    formations = await list_formations_by_org(str(catalogue_org["_id"]))
+    return formations
+
+
+@router.get("/catalogue/organizations")
+async def get_assignable_organizations(current_user: dict = Depends(get_current_user)):
+    """
+    Liste toutes les organisations (hors CATALOGUE) pour l'affectation.
+    Accessible à l'admin catalogue et au superadmin.
+    """
+    db = get_database()
+    user_role = current_user.get("role")
+
+    if user_role == "superadmin":
+        pass
+    elif not await _is_catalogue_admin(current_user, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé à l'administrateur du catalogue.",
+        )
+
+    cursor = db["organizations"].find(
+        {"code": {"$ne": "CATALOGUE"}, "status": "active"},
+        {"_id": 1, "name": 1, "code": 1, "country": 1}
+    )
+    orgs = []
+    async for doc in cursor:
+        orgs.append({
+            "id": str(doc["_id"]),
+            "name": doc.get("name", ""),
+            "code": doc.get("code", ""),
+            "country": doc.get("country", ""),
+        })
+    return orgs
+
+
+@router.post("/{formation_id}/assign")
+async def assign_formation_to_orgs(
+    formation_id: str,
+    body: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Copie une formation du catalogue vers une ou plusieurs organisations.
+    Body: { "org_ids": ["<id1>", "<id2>", ...] }
+    Accessible à l'admin catalogue et au superadmin.
+    """
+    import copy
+
+    db = get_database()
+    user_role = current_user.get("role")
+
+    if user_role == "superadmin":
+        pass
+    elif not await _is_catalogue_admin(current_user, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé à l'administrateur du catalogue.",
+        )
+
+    org_ids = body.get("org_ids", [])
+    if not org_ids:
+        raise HTTPException(status_code=400, detail="Aucune organisation fournie.")
+
+    # Récupérer la formation source
+    try:
+        source_oid = ObjectId(formation_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="formation_id invalide.")
+
+    source = await db["formations"].find_one({"_id": source_oid})
+    if not source:
+        raise HTTPException(status_code=404, detail="Formation introuvable.")
+
+    results = []
+    for org_id in org_ids:
+        try:
+            target_oid = ObjectId(org_id)
+        except Exception:
+            results.append({"org_id": org_id, "status": "error", "detail": "org_id invalide"})
+            continue
+
+        # Vérifier que l'org existe
+        org = await db["organizations"].find_one({"_id": target_oid})
+        if not org:
+            results.append({"org_id": org_id, "status": "error", "detail": "Organisation introuvable"})
+            continue
+
+        # Vérifier doublon
+        existing = await db["formations"].find_one({
+            "titre": source["titre"],
+            "organization_id": target_oid,
+        })
+        if existing:
+            results.append({
+                "org_id": org_id,
+                "org_name": org.get("name"),
+                "status": "skipped",
+                "detail": "Formation déjà présente dans cette organisation",
+            })
+            continue
+
+        # Copie profonde avec nouveaux ObjectIds
+        doc = copy.deepcopy(source)
+        doc.pop("_id")
+        doc["organization_id"] = target_oid
+        doc["created_at"] = datetime.utcnow()
+
+        for m in doc.get("modules", []):
+            m["_id"] = ObjectId()
+            for ch in m.get("chapitres", []):
+                ch["_id"] = ObjectId()
+                for p in ch.get("parties", []):
+                    p["_id"] = ObjectId()
+
+        inserted = await db["formations"].insert_one(doc)
+        results.append({
+            "org_id": org_id,
+            "org_name": org.get("name"),
+            "status": "assigned",
+            "formation_id": str(inserted.inserted_id),
+        })
+
+    assigned = [r for r in results if r["status"] == "assigned"]
+    skipped  = [r for r in results if r["status"] == "skipped"]
+    errors   = [r for r in results if r["status"] == "error"]
+
+    return {
+        "formation_titre": source.get("titre"),
+        "total": len(org_ids),
+        "assigned": len(assigned),
+        "skipped": len(skipped),
+        "errors": len(errors),
+        "details": results,
+    }

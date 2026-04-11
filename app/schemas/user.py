@@ -36,6 +36,7 @@ class UserPublic(UserBase):
     id: str
     organization_id: Optional[str] = None  # None pour les super admins
     organization_name: Optional[str] = None  # Nom de l'organisation
+    organization_code: Optional[str] = None  # Code de l'organisation (ex: CATALOGUE)
     department_id: Optional[str] = None
     department_name: Optional[str] = None
     service_id: Optional[str] = None
