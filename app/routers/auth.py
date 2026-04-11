@@ -1,8 +1,13 @@
+import os
+import secrets
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Optional
 
 from app.core.deps import get_current_user
-from app.core.security import create_access_token
+from app.core.db import get_database
+from app.core.security import create_access_token, hash_password
 from app.models.department import get_department_by_id, get_service_by_id
 from app.models.license import get_active_license_for_org  # 🔒 nouveau
 from app.models.organization import (
@@ -28,6 +33,18 @@ router = APIRouter(
 
 @router.post("/register", response_model=UserPublic)
 async def register(user_in: UserCreate):
+    # Si pas d'organisation fournie → compte démo, on assigne à MIZNAS
+    if not user_in.organization_id:
+        from app.core.db import get_database
+        db = get_database()
+        miznas_org = await db["organizations"].find_one({"code": "MIZNAS_TEST"})
+        if not miznas_org:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Organisation démo indisponible. Contactez l'administrateur.",
+            )
+        user_in = user_in.model_copy(update={"organization_id": str(miznas_org["_id"])})
+
     try:
         user = await create_user(user_in)
         return user
@@ -37,10 +54,9 @@ async def register(user_in: UserCreate):
             detail=str(e),
         )
     except Exception as e:
-        # Capturer toutes les autres exceptions pour éviter les 500
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Erreur lors de la création de l'utilisateur: {str(e)}",
+            detail=f"Erreur lors de la creation du compte: {str(e)}",
         )
 
 
@@ -525,35 +541,79 @@ async def update_user_for_organization(
 
 @router.post("/forgot-password")
 async def forgot_password(data: dict):
-    """
-    Envoie un email de réinitialisation du mot de passe
-    """
-    email = data.get("email")
-    
-    if not email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="L'email est requis",
-        )
-    
-    try:
-        # Vérifier si l'utilisateur existe
-        from app.models.user import get_user_by_email
-        user = await get_user_by_email(email)
-        
-        if not user:
-            # Pour des raisons de sécurité, ne pas révéler si l'email existe ou non
-            return {"message": "Si l'email existe, un lien de réinitialisation a été envoyé"}
-        
-        # TODO: Implémenter l'envoi d'email avec le lien de réinitialisation
-        # (sendgrid, mailgun, ou autre service SMTP)
+    """Envoie un email de réinitialisation du mot de passe via Gmail SMTP."""
+    from app.models.user import get_user_by_email
+    from app.services.email_service import send_email, reset_password_html
 
-        return {
-            "message": "Si l'email existe, un lien de réinitialisation a été envoyé"
-        }
-        
+    email = data.get("email", "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="L'email est requis")
+
+    # Toujours répondre la même chose (sécurité : ne pas révéler si l'email existe)
+    ok_response = {"message": "Si l'email existe, un lien de réinitialisation a été envoyé"}
+
+    user = await get_user_by_email(email)
+    if not user:
+        return ok_response
+
+    # Générer un token sécurisé
+    token = secrets.token_urlsafe(48)
+    expires_at = datetime.utcnow() + timedelta(hours=1)
+
+    db = get_database()
+    # Invalider les anciens tokens pour cet email
+    await db["password_reset_tokens"].delete_many({"email": email})
+    await db["password_reset_tokens"].insert_one({
+        "email": email,
+        "token": token,
+        "expires_at": expires_at,
+        "used": False,
+    })
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    reset_link = f"{frontend_url}/reset-password?token={token}"
+
+    user_name = user.get("full_name", "")
+    html = reset_password_html(reset_link, user_name)
+
+    try:
+        await send_email(email, "Réinitialisation de votre mot de passe — Miznas Pilot", html)
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de l'envoi de l'email: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Erreur envoi email : {str(e)}")
+
+    return ok_response
+
+
+@router.post("/reset-password")
+async def reset_password(data: dict):
+    """Valide le token et met à jour le mot de passe."""
+    token    = data.get("token", "").strip()
+    password = data.get("password", "").strip()
+
+    if not token or not password:
+        raise HTTPException(status_code=400, detail="Token et mot de passe requis")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Le mot de passe doit contenir au moins 8 caractères")
+
+    db = get_database()
+    record = await db["password_reset_tokens"].find_one({"token": token, "used": False})
+
+    if not record:
+        raise HTTPException(status_code=400, detail="Lien invalide ou déjà utilisé")
+    if record["expires_at"] < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Lien expiré. Veuillez refaire une demande.")
+
+    # Mettre à jour le mot de passe
+    new_hash = hash_password(password)
+    await db["users"].update_one(
+        {"email": record["email"]},
+        {"$set": {"password_hash": new_hash}}
+    )
+
+    # Invalider le token
+    await db["password_reset_tokens"].update_one(
+        {"token": token},
+        {"$set": {"used": True}}
+    )
+
+    return {"message": "Mot de passe mis à jour avec succès"}

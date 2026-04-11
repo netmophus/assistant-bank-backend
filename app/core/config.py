@@ -24,7 +24,7 @@ class Settings:
     
     # OpenAI Configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
     
     # Limites d'utilisation IA par défaut
     AI_DAILY_LIMIT_PER_ORG: int = int(os.getenv("AI_DAILY_LIMIT_PER_ORG", "50"))

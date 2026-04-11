@@ -19,6 +19,47 @@ def _org_doc_to_public(doc) -> dict:
     }
 
 
+async def get_web_search_config(org_id: str) -> dict:
+    db = get_database()
+    try:
+        oid = ObjectId(org_id)
+    except Exception:
+        raise ValueError("organization_id invalide.")
+    org = await db[ORGANIZATIONS_COLLECTION].find_one({"_id": oid})
+    if not org:
+        raise ValueError("Organisation introuvable.")
+    return {
+        "web_search_enabled": org.get("web_search_enabled", False),
+        "web_search_sites": org.get("web_search_sites", []),
+    }
+
+
+async def update_web_search_config(org_id: str, enabled: Optional[bool], sites: Optional[List[str]]) -> dict:
+    db = get_database()
+    try:
+        oid = ObjectId(org_id)
+    except Exception:
+        raise ValueError("organization_id invalide.")
+    org = await db[ORGANIZATIONS_COLLECTION].find_one({"_id": oid})
+    if not org:
+        raise ValueError("Organisation introuvable.")
+
+    update_doc: dict = {"updated_at": datetime.utcnow()}
+    if enabled is not None:
+        update_doc["web_search_enabled"] = enabled
+    if sites is not None:
+        # Nettoyer les URLs : strip whitespace, retirer les entrées vides
+        update_doc["web_search_sites"] = [s.strip() for s in sites if s.strip()]
+
+    await db[ORGANIZATIONS_COLLECTION].update_one({"_id": oid}, {"$set": update_doc})
+
+    updated = await db[ORGANIZATIONS_COLLECTION].find_one({"_id": oid})
+    return {
+        "web_search_enabled": updated.get("web_search_enabled", False),
+        "web_search_sites": updated.get("web_search_sites", []),
+    }
+
+
 async def get_organization_by_id(org_id: str) -> Optional[dict]:
     db = get_database()
     try:

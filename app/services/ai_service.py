@@ -615,7 +615,7 @@ IMPORTANT - Formules mathématiques:
 
         base_system_prompt = (response_config.get("system_prompt") or "").strip()
         if not base_system_prompt:
-            base_system_prompt = "Tu es Fahimta AI, un assistant expert en formation bancaire spécialisé dans la réglementation UEMOA."
+            base_system_prompt = "Tu es Miznas AI, un assistant expert en formation bancaire spécialisé dans la réglementation UEMOA."
 
         formatting_constraints = """
 

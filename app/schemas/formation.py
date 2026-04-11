@@ -66,6 +66,8 @@ class ModulePublic(ModuleBase):
 class FormationBase(BaseModel):
     titre: str = Field(default="", example="Formation sur la réglementation bancaire")
     description: Optional[str] = Field(None, example="Formation complète sur la réglementation UEMOA")
+    bloc_numero: Optional[int] = Field(None, description="Numéro du bloc de formation (ex: 1)")
+    bloc_titre: Optional[str] = Field(None, description="Titre du bloc (ex: Plan Comptable Bancaire)")
 
 
 class FormationCreate(FormationBase):
@@ -79,6 +81,8 @@ class FormationUpdate(BaseModel):
     description: Optional[str] = None
     status: Optional[str] = None  # draft, published, archived
     modules: Optional[List[ModuleCreate]] = None
+    bloc_numero: Optional[int] = None
+    bloc_titre: Optional[str] = None
 
 
 class FormationDepartmentAssignment(BaseModel):
@@ -93,4 +97,5 @@ class FormationPublic(FormationBase):
     modules: List[ModulePublic] = Field(default_factory=list, description="Liste des modules de la formation")
     modules_count: Optional[int] = 0
     created_at: Optional[str] = None
+    bloc_label: Optional[str] = Field(None, description="Label complet: BLOC N — Titre")
 

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 
 class OrganizationBase(BaseModel):
@@ -22,3 +22,13 @@ class OrganizationUpdate(BaseModel):
 class OrganizationPublic(OrganizationBase):
     id: str
     status: str = "active"
+
+
+class WebSearchConfig(BaseModel):
+    web_search_enabled: bool = False
+    web_search_sites: List[str] = []
+
+
+class WebSearchConfigUpdate(BaseModel):
+    web_search_enabled: Optional[bool] = None
+    web_search_sites: Optional[List[str]] = None

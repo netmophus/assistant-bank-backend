@@ -9,7 +9,25 @@ from app.models.department import get_department_by_id, get_service_by_id
 import logging
 
 QUESTIONS_COLLECTION = "questions"
-QUOTA_LIMIT = 60  # 60 questions par mois
+QUOTA_LIMIT = 60  # quota par défaut (60 questions/mois)
+
+
+async def get_quota_limit_for_user(user_id: str) -> int:
+    """Retourne le quota mensuel applicable à l'utilisateur.
+    Si son organisation a un quota personnalisé (question_quota), on l'utilise.
+    Sinon, on retourne le quota par défaut (60).
+    """
+    db = get_database()
+    try:
+        user_oid = ObjectId(user_id)
+        user = await db["users"].find_one({"_id": user_oid})
+        if user and user.get("organization_id"):
+            org = await db["organizations"].find_one({"_id": ObjectId(str(user["organization_id"]))})
+            if org and org.get("question_quota") is not None:
+                return int(org["question_quota"])
+    except Exception:
+        pass
+    return QUOTA_LIMIT
 
 
 def _question_doc_to_public(doc) -> dict:
@@ -29,6 +47,7 @@ async def get_user_quota_stats(user_id: str) -> dict:
     Récupère les statistiques de quota pour un utilisateur pour le mois en cours.
     """
     db = get_database()
+    quota = await get_quota_limit_for_user(user_id)
     try:
         user_oid = ObjectId(user_id)
     except Exception:
@@ -36,16 +55,16 @@ async def get_user_quota_stats(user_id: str) -> dict:
             "user_id": user_id,
             "current_month": datetime.now().strftime("%Y-%m"),
             "questions_asked": 0,
-            "quota_limit": QUOTA_LIMIT,
-            "remaining_quota": QUOTA_LIMIT,
+            "quota_limit": quota,
+            "remaining_quota": quota,
             "is_quota_exceeded": False,
         }
-    
+
     # Calculer le début et la fin du mois en cours
     now = datetime.utcnow()
     start_of_month = datetime(now.year, now.month, 1)
     end_of_month = datetime(now.year, now.month + 1, 1) if now.month < 12 else datetime(now.year + 1, 1, 1)
-    
+
     # Compter les questions du mois en cours
     count = await db[QUESTIONS_COLLECTION].count_documents({
         "user_id": user_oid,
@@ -54,15 +73,15 @@ async def get_user_quota_stats(user_id: str) -> dict:
             "$lt": end_of_month
         }
     })
-    
-    remaining = max(0, QUOTA_LIMIT - count)
-    is_exceeded = count >= QUOTA_LIMIT
-    
+
+    remaining = max(0, quota - count)
+    is_exceeded = count >= quota
+
     return {
         "user_id": user_id,
         "current_month": now.strftime("%Y-%m"),
         "questions_asked": count,
-        "quota_limit": QUOTA_LIMIT,
+        "quota_limit": quota,
         "remaining_quota": remaining,
         "is_quota_exceeded": is_exceeded,
     }
@@ -195,30 +214,41 @@ async def create_question(user_id: str, question_text: str, context: Optional[st
     result = await db[QUESTIONS_COLLECTION].insert_one(doc)
     doc["_id"] = result.inserted_id
     
-    # Générer la réponse via RAG New (GLOBAL -> LOCAL -> IA générale)
+    # Générer la réponse via Perplexity (recherche web temps réel + expertise UEMOA)
     try:
-        allow_global = False
+        from app.services.perplexity_service import answer_with_perplexity, _is_configured
+
+        # Récupérer les sites configurés pour l'organisation
+        sites: list[str] = []
         if organization_id:
-            from app.models.license import org_has_active_license
+            try:
+                from app.models.organization import get_web_search_config
+                web_cfg = await get_web_search_config(organization_id)
+                if web_cfg.get("web_search_enabled") and web_cfg.get("web_search_sites"):
+                    sites = web_cfg["web_search_sites"]
+            except Exception:
+                pass
 
-            allow_global = await org_has_active_license(organization_id)
-
-        from app.services.rag_new_service import answer_question
-
-        answer, _strategy, _sources, _debug = await answer_question(
-            question=question_text,
-            organization_id=organization_id,
-            category=None,
-            allow_global=allow_global,
-        )
-    except Exception as e:
-        # En cas d'erreur, utiliser une réponse par défaut
-        logger = logging.getLogger(__name__)
-        msg = str(e)
-        if "SearchNotEnabled" in msg or "31082" in msg or "requires additional configuration" in msg:
-            logger.warning(f"Erreur lors de la génération de la réponse IA: {e}")
+        if _is_configured():
+            result = await answer_with_perplexity(question_text, sites=sites or None)
+            answer = result.get("answer") or ""
         else:
-            logger.error(f"Erreur lors de la génération de la réponse IA: {e}")
+            # Fallback OpenAI si Perplexity non configuré
+            from app.services.rag_new_service import answer_question
+            answer, _s, _src, _d = await answer_question(
+                question=question_text,
+                organization_id=organization_id,
+                category=None,
+                allow_global=False,
+                skip_rag=True,
+            )
+
+        if not answer:
+            raise ValueError("Réponse vide")
+
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error("Erreur génération réponse IA: %s", e)
         answer = "Désolé, une erreur est survenue lors de la génération de la réponse. Veuillez réessayer plus tard."
     
     # Mettre à jour avec la réponse

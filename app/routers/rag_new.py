@@ -27,6 +27,62 @@ from app.services.rag_new_service import (
 router = APIRouter(prefix="/api/rag-new", tags=["rag-new"])
 
 
+@router.get("/debug-web-search")
+async def debug_web_search(
+    question: str = "loi de finance 2026 Niger",
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Endpoint de diagnostic pour la recherche web.
+    Vérifie la config et teste le service web search.
+    Accessible à tous les utilisateurs authentifiés.
+    """
+    org_id = current_user.get("organization_id")
+    result: Dict[str, Any] = {
+        "organization_id": org_id,
+        "role": current_user.get("role"),
+        "web_config": None,
+        "web_search_triggered": False,
+        "web_sources_found": 0,
+        "web_sources_preview": [],
+        "error": None,
+    }
+
+    if not org_id:
+        result["error"] = "Aucun organization_id dans le token (superadmin sans org). La recherche web nécessite un org_id."
+        return result
+
+    try:
+        from app.models.organization import get_web_search_config
+        web_cfg = await get_web_search_config(org_id)
+        result["web_config"] = web_cfg
+    except Exception as exc:
+        result["error"] = f"Erreur get_web_search_config: {exc}"
+        return result
+
+    if not web_cfg.get("web_search_enabled"):
+        result["error"] = "web_search_enabled = False. Active-le dans le superadmin."
+        return result
+
+    if not web_cfg.get("web_search_sites"):
+        result["error"] = "web_search_sites est vide. Ajoute des sites dans le superadmin."
+        return result
+
+    try:
+        from app.services.web_search_service import search_web
+        result["web_search_triggered"] = True
+        sources = await search_web(question, web_cfg["web_search_sites"])
+        result["web_sources_found"] = len(sources)
+        result["web_sources_preview"] = [
+            {"url": s["metadata"].get("url"), "title": s["metadata"].get("title"), "content_len": len(s["content"])}
+            for s in sources[:3]
+        ]
+    except Exception as exc:
+        result["error"] = f"Erreur search_web: {exc}"
+
+    return result
+
+
 async def _validate_category_slug(category: str) -> None:
     cat = await get_category_by_slug(category)
     if not cat or not cat.get("is_active", False):

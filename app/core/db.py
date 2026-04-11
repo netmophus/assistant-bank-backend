@@ -27,8 +27,12 @@ def get_client() -> AsyncIOMotorClient:
     global _client
 
     if _client is None:
-
-        _client = AsyncIOMotorClient(settings.MONGO_URI)
+        _client = AsyncIOMotorClient(
+            settings.MONGO_URI,
+            serverSelectionTimeoutMS=8000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=45000,
+        )
 
     return _client
 

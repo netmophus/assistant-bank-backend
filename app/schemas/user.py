@@ -10,7 +10,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(min_length=6)
-    organization_id: str
+    organization_id: Optional[str] = Field(None, description="Laisse vide = compte demo MIZNAS")
     department_id: Optional[str] = Field(None, description="ID du département")
     service_id: Optional[str] = Field(None, description="ID du service")
     role: Optional[str] = Field(default="user", description="Rôle de l'utilisateur")

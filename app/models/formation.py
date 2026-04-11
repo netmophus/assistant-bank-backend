@@ -31,6 +31,13 @@ FORMATIONS_COLLECTION = "formations"
 # -----------------------------------------------------------------------------
 
 def _formation_doc_to_public(doc) -> dict:
+    bloc_numero = doc.get("bloc_numero")
+    bloc_titre = doc.get("bloc_titre")
+    bloc_label = None
+    if bloc_numero is not None and bloc_titre:
+        bloc_label = f"BLOC {bloc_numero} — {bloc_titre}"
+    elif bloc_numero is not None:
+        bloc_label = f"BLOC {bloc_numero}"
     return {
         "id": str(doc["_id"]),
         "titre": doc["titre"],
@@ -38,6 +45,9 @@ def _formation_doc_to_public(doc) -> dict:
         "organization_id": str(doc["organization_id"]),
         "status": doc.get("status", "draft"),
         "created_at": doc.get("created_at").isoformat() if doc.get("created_at") and isinstance(doc.get("created_at"), datetime) else None,
+        "bloc_numero": bloc_numero,
+        "bloc_titre": bloc_titre,
+        "bloc_label": bloc_label,
     }
 
 
@@ -158,6 +168,8 @@ async def create_formation(formation_in: dict, org_id: str) -> dict:
         "status": status,
         "modules": modules_data,
         "created_at": datetime.utcnow(),
+        "bloc_numero": formation_in.get("bloc_numero"),
+        "bloc_titre": formation_in.get("bloc_titre"),
     }
     
     result = await db[FORMATIONS_COLLECTION].insert_one(doc)
@@ -182,9 +194,15 @@ async def list_formations_by_org(org_id: str) -> List[dict]:
     except Exception:
         return []
     
-    cursor = db[FORMATIONS_COLLECTION].find({"organization_id": org_oid}).sort("created_at", -1)
+    # Vérifier si l'org a une limite de formations (mode démo)
+    org = await db["organizations"].find_one({"_id": org_oid})
+    formation_limit = org.get("formation_limit") if org else None
+
+    cursor = db[FORMATIONS_COLLECTION].find({"organization_id": org_oid}).sort("created_at", 1)
     formations = []
     async for doc in cursor:
+        if formation_limit is not None and len(formations) >= formation_limit:
+            break
         formation = _formation_doc_to_public(doc)
         formation["modules"] = [_module_doc_to_public(m) for m in doc.get("modules", [])]
         formation["modules_count"] = len(doc.get("modules", []))
@@ -242,6 +260,10 @@ async def update_formation(formation_id: str, update_data: dict, org_id: str) ->
         update_doc["description"] = update_data["description"]
     if "status" in update_data:
         update_doc["status"] = update_data["status"]
+    if "bloc_numero" in update_data:
+        update_doc["bloc_numero"] = update_data["bloc_numero"]
+    if "bloc_titre" in update_data:
+        update_doc["bloc_titre"] = update_data["bloc_titre"]
     
     # Si on met à jour les modules, reconstruire la structure en préservant les IDs existants
     if "modules" in update_data:
