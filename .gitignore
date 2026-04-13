@@ -23,3 +23,7 @@ package-lock.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Scripts d'injection ponctuels
+inject_formation_pcb*.py
+MEMOIRE_FORMATION.md
