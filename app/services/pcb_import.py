@@ -170,10 +170,17 @@ async def import_gl_from_excel(
         # Traiter chaque ligne et agréger
         total_lignes = 0
         for row_idx, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=False), start=header_row + 1):
+            # Ignorer silencieusement les lignes entièrement vides (formatage Excel résiduel)
+            if all(
+                cell.value is None or (isinstance(cell.value, str) and cell.value.strip() == "")
+                for cell in row
+            ):
+                continue
+
             total_lignes += 1
             index = row_idx - header_row - 1
             try:
-                
+
                 # Récupérer les valeurs
                 code_gl = str(get_cell_value(row, "Code_GL") or "").strip()
                 libelle_gl = str(get_cell_value(row, "Libelle_GL") or "").strip()

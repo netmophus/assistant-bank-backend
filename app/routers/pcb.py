@@ -30,6 +30,7 @@ from app.models.pcb import (
     delete_ratio_variable_catalog_item,
     list_ratio_variable_values_public,
     upsert_ratio_variable_value,
+    PCB_REPORTS_COLLECTION,
 )
 from app.schemas.pcb import (
     GLCreate,
@@ -523,6 +524,7 @@ async def generate_report(
     section: Optional[str] = None,
     date_realisation: Optional[datetime] = None,
     date_debut: Optional[datetime] = None,
+    date_n1: Optional[datetime] = None,
     include_ia: bool = True,
     modele_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
@@ -603,6 +605,7 @@ async def generate_report(
             "meta": {
                 "date_realisation": date_realisation,
                 "date_cloture": date_cloture,
+                "date_n1": date_n1,
             },
         }
 
@@ -652,6 +655,7 @@ async def generate_report(
             "meta": {
                 "date_realisation": date_realisation,
                 "date_cloture": date_cloture,
+                "date_n1": date_n1,
             },
         }
 
@@ -765,6 +769,7 @@ async def generate_report(
         "meta": {
             "date_realisation": date_realisation,
             "date_cloture": date_cloture,
+            "date_n1": date_n1,
         }
     }
 
@@ -903,6 +908,77 @@ async def preview_ratios(
             "ratios": ratios,
             "ratios_details": ratios_details,
         }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+
+@router.post("/ratios/analyse")
+async def analyse_ratios_ia(
+    payload: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """Calcule les ratios à une date + génère une analyse IA (sans sauvegarder de rapport)."""
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    if user_role not in ["admin", "user"] or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé aux utilisateurs authentifiés.",
+        )
+
+    type_rapport = (payload or {}).get("type_rapport")
+    date_cloture = (payload or {}).get("date_cloture")
+    if not type_rapport or not date_cloture:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Paramètres requis: type_rapport, date_cloture",
+        )
+
+    try:
+        d = datetime.strptime(date_cloture, "%Y-%m-%d")
+        d = datetime(d.year, d.month, d.day)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Format date_cloture invalide. Utilisez YYYY-MM-DD",
+        )
+
+    try:
+        structure = await calculer_structure_rapport(type_rapport, str(user_org_id), date_solde=d, section=None)
+        if isinstance(structure, dict):
+            structure.setdefault("meta", {})
+            structure["meta"]["date_cloture"] = d
+
+        ratios_details = await calculer_ratios_bancaires(structure, str(user_org_id), type_rapport, use_config=True)
+
+        interpretation_ia = ""
+        try:
+            interpretation_ia = await generer_interpretation_ia(
+                type_rapport,
+                {
+                    "postes": structure.get("postes", []) if isinstance(structure, dict) else [],
+                    "totaux": structure.get("totaux", {}) if isinstance(structure, dict) else {},
+                    "meta": structure.get("meta") if isinstance(structure, dict) else None,
+                },
+                ratios_details,
+                d.strftime("%Y-%m-%d"),
+            )
+        except Exception as e:
+            msg = f"{e.__class__.__name__}: {str(e)}"
+            interpretation_ia = f"⚠️ Analyse IA non disponible pour le moment. ({msg[:280]})"
+
+        return {
+            "type_rapport": type_rapport,
+            "date_cloture": d,
+            "ratios_details": ratios_details,
+            "interpretation_ia": interpretation_ia,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1388,6 +1464,263 @@ async def delete_report_endpoint(
         )
 
     return {"success": True}
+
+
+@router.post("/reports/import", response_model=ReportPublic)
+async def import_bilan_excel(
+    file: UploadFile = File(..., description="Fichier Excel .xlsx du bilan"),
+    type_rapport: str = Form("bilan_reglementaire"),
+    date_cloture: str = Form(..., description="Date de clôture YYYY-MM-DD"),
+    date_n1: Optional[str] = Form(None),
+    date_realisation: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Importe un bilan depuis un fichier Excel (.xlsx).
+    Parse les codes PCB et leurs valeurs, crée un rapport stocké en base
+    (au même format que les rapports générés depuis les GL).
+    L'analyse IA peut ensuite être déclenchée normalement via /reports/{id}/analyser-ia.
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+    user_id = current_user.get("id")
+
+    if user_role not in ["admin", "user"] or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé aux utilisateurs authentifiés.",
+        )
+
+    # Validation du type
+    if type_rapport not in ("bilan_reglementaire", "hors_bilan", "compte_resultat"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type_rapport invalide pour l'import Excel.",
+        )
+
+    # Validation de l'extension
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Seuls les fichiers .xlsx sont acceptés pour le moment.",
+        )
+
+    # Lecture et parsing
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Impossible de lire le fichier : {e}",
+        )
+
+    from app.services.pcb_import_service import parse_excel_bilan
+    try:
+        parsed = parse_excel_bilan(content, unit="millions")
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors du parsing Excel : {e.__class__.__name__}: {str(e)[:200]}",
+        )
+
+    # Conversion des dates
+    try:
+        d_cloture = datetime.strptime(date_cloture, "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Format date_cloture invalide. Utilisez YYYY-MM-DD",
+        )
+
+    d_n1 = None
+    if date_n1:
+        try:
+            d_n1 = datetime.strptime(date_n1, "%Y-%m-%d")
+        except Exception:
+            pass
+
+    d_ref = None
+    if date_realisation:
+        try:
+            d_ref = datetime.strptime(date_realisation, "%Y-%m-%d")
+        except Exception:
+            pass
+
+    # Enrichissement de la structure avec la méta (dates)
+    structure = {
+        **parsed,
+        "meta": {
+            "date_cloture": d_cloture,
+            "date_n1": d_n1,
+            "date_realisation": d_ref,
+            "source": "excel_import",
+            "filename": file.filename,
+        },
+    }
+
+    # Création du rapport
+    report_data = {
+        "type": type_rapport,
+        "section": None,
+        "exercice": str(d_cloture.year),
+        "date_cloture": d_cloture,
+        "date_realisation": d_ref,
+        "date_debut": None,
+        "modele_id": None,
+        "structure": structure,
+        "ratios_bancaires": {},
+        "interpretation_ia": "",
+        "statut": "imported",
+    }
+
+    report = await create_report(report_data, str(user_org_id), str(user_id))
+    return report
+
+
+@router.post("/generation-auto")
+async def generation_auto_bilan_cr(
+    file: UploadFile = File(..., description="Fichier Excel .xlsx de balance GL"),
+    date_cloture: str = Form(..., description="Date de clôture YYYY-MM-DD"),
+    date_n1: Optional[str] = Form(None),
+    date_realisation: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Génère automatiquement un bilan + compte de résultat à partir d'une balance
+    GL Excel, via le mapping officiel PCB UMOA (préfixes de comptes).
+
+    Colonnes Excel attendues : Code_GL, Libelle_GL, Classe, Solde_Debit,
+    Solde_Credit, Date_Solde, Devise.
+
+    Retourne la structure {bilan_actif, bilan_passif, compte_resultat, totaux,
+    meta} avec soldes en millions de FCFA.
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    if user_role not in ["admin", "user"] or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé aux utilisateurs authentifiés.",
+        )
+
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Seuls les fichiers .xlsx sont acceptés.",
+        )
+
+    # Validation de la date
+    try:
+        datetime.strptime(date_cloture, "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Format date_cloture invalide. Utilisez YYYY-MM-DD",
+        )
+
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Impossible de lire le fichier : {e}",
+        )
+
+    from app.services.pcb_gl_mapping_service import generer_bilan_et_cr
+    try:
+        result = generer_bilan_et_cr(
+            content,
+            date_cloture=date_cloture,
+            date_n1=date_n1,
+            date_realisation=date_realisation,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors du traitement : {e.__class__.__name__}: {str(e)[:200]}",
+        )
+
+    return result
+
+
+@router.post("/reports/{report_id}/analyser-ia", response_model=ReportPublic)
+async def analyser_rapport_ia(
+    report_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Lance l'analyse IA sur un rapport existant, stocke le résultat dans le rapport,
+    et retourne le rapport mis à jour.
+
+    Cet endpoint sépare la génération du rapport (rapide, sans IA) de l'analyse IA
+    (plus longue, déclenchée à la demande par l'utilisateur depuis l'aperçu).
+    """
+    user_role = current_user.get("role", "user")
+    user_org_id = current_user.get("organization_id")
+
+    if user_role not in ["admin", "user"] or not user_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès réservé aux utilisateurs authentifiés.",
+        )
+
+    report = await get_report_by_id(report_id, str(user_org_id))
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rapport introuvable.",
+        )
+
+    structure = report.get("structure") or {}
+    ratios = report.get("ratios_bancaires") or {}
+    type_rapport = report.get("type") or "bilan_reglementaire"
+    date_cloture = report.get("date_cloture")
+    date_str = None
+    if date_cloture:
+        try:
+            date_str = date_cloture.strftime("%Y-%m-%d") if hasattr(date_cloture, "strftime") else str(date_cloture)[:10]
+        except Exception:
+            date_str = str(date_cloture)[:10]
+
+    try:
+        interpretation_ia = await generer_interpretation_ia(
+            type_rapport,
+            structure,
+            ratios,
+            date_str,
+            organization_id=str(user_org_id),
+        )
+    except Exception as e:
+        msg = f"{e.__class__.__name__}: {str(e)}"
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la génération de l'analyse IA : {msg[:300]}",
+        )
+
+    # Mise à jour en base
+    from app.core.db import get_database
+    from bson import ObjectId as _ObjectId
+    db = get_database()
+    await db[PCB_REPORTS_COLLECTION].update_one(
+        {"_id": _ObjectId(report_id), "organization_id": _ObjectId(str(user_org_id))},
+        {"$set": {"interpretation_ia": interpretation_ia, "updated_at": datetime.utcnow()}},
+    )
+
+    updated = await get_report_by_id(report_id, str(user_org_id))
+    return updated
 
 
 # ========== CALCULS ET TESTS ==========

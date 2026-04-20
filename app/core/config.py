@@ -25,6 +25,10 @@ class Settings:
     # OpenAI Configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+    # Anthropic Configuration (utilisé par pcb_ai_service pour l'analyse PCB)
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     
     # Limites d'utilisation IA par défaut
     AI_DAILY_LIMIT_PER_ORG: int = int(os.getenv("AI_DAILY_LIMIT_PER_ORG", "50"))

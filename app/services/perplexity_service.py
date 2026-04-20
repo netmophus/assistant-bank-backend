@@ -17,6 +17,34 @@ logger = logging.getLogger(__name__)
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 PERPLEXITY_MODEL   = os.getenv("PERPLEXITY_MODEL", "sonar-pro")
 
+# Liste blanche par défaut : sources officielles UMOA/UEMOA et médias africains
+# spécialisés. Utilisée quand aucune liste n'est configurée par l'organisation,
+# pour éviter que Perplexity ne cite des sources françaises ou non africaines.
+DEFAULT_UEMOA_DOMAINS: list[str] = [
+    "bceao.int",
+    "commission-bancaire.org",
+    "uemoa.int",
+    "ohada.com",
+    "ohada.org",
+    "droit-afrique.com",
+    "juriafrica.com",
+    "brvm.org",
+    "crepmf.org",
+    "izf.net",
+    "financialafrik.com",
+    "agenceecofin.com",
+    "ecofinagency.com",
+    "sikafinance.com",
+    "jeuneafrique.com",
+    "lemonde.sn",
+]
+
+
+def _domain_of(url: str) -> str:
+    cleaned = url.strip().lower()
+    cleaned = cleaned.replace("https://", "").replace("http://", "").replace("www.", "")
+    return cleaned.split("/")[0]
+
 _SYSTEM_PROMPT = """Tu es Miznas AI, expert de rang mondial en réglementation bancaire UEMOA, Plan Comptable Bancaire (PCB), droit bancaire, finance et tout ce qu'un professionnel bancaire de la zone UEMOA/BCEAO doit maîtriser.
 
 DOMAINE STRICT : Tu réponds UNIQUEMENT aux questions relevant de la banque, de la finance, de la réglementation bancaire UEMOA/BCEAO, du PCB, du droit bancaire et OHADA, de la conformité, des marchés financiers, de la microfinance, de la fiscalité bancaire, de la gestion des risques et de tout sujet directement lié à la pratique bancaire en zone UEMOA. Si la question est hors de ce domaine, réponds poliment : "Je suis spécialisé en réglementation bancaire UEMOA, PCB et droit bancaire. Je ne peux pas répondre à cette question."
@@ -149,18 +177,22 @@ async def answer_with_perplexity(
         )
 
         extra: dict[str, Any] = {"return_citations": True}
+
+        # Construire la liste de domaines : ceux fournis par l'organisation,
+        # sinon la whitelist UEMOA par défaut. Dans tous les cas, on restreint
+        # la recherche à des sources africaines UMOA/UEMOA fiables.
+        clean_sites: list[str] = []
         if sites:
-            # Nettoyer les domaines (enlever http://, www., etc.)
-            clean_sites = []
             for s in sites:
-                s = s.strip().lower()
-                s = s.replace("https://", "").replace("http://", "").replace("www.", "")
-                s = s.split("/")[0]  # garder seulement le domaine
-                if s:
-                    clean_sites.append(s)
-            if clean_sites:
-                extra["search_domain_filter"] = clean_sites
-                logger.info("Perplexity | sites filtrés : %s", clean_sites)
+                d = _domain_of(s)
+                if d:
+                    clean_sites.append(d)
+
+        if not clean_sites:
+            clean_sites = list(DEFAULT_UEMOA_DOMAINS)
+
+        extra["search_domain_filter"] = clean_sites
+        logger.info("Perplexity | sites filtrés : %s", clean_sites)
 
         response = await client.chat.completions.create(
             model=PERPLEXITY_MODEL,
@@ -178,11 +210,25 @@ async def answer_with_perplexity(
         if hasattr(response, "citations") and response.citations:
             citations = list(response.citations)
 
-        # Ajouter les sources en bas de la réponse si présentes
+        # Ajouter les sources en bas de la réponse si présentes.
+        # Filtre supplémentaire : on ne garde que les citations dont le domaine
+        # appartient à la liste effectivement utilisée (sécurité si Perplexity
+        # renvoie malgré tout une source hors whitelist).
         if citations:
-            answer_text += "\n\n---\n## Sources consultées\n"
-            for i, url in enumerate(citations, 1):
-                answer_text += f"{i}. [{url}]({url})\n"
+            allowed = set(clean_sites)
+            filtered: list[str] = []
+            seen_domains: set[str] = set()
+            for url in citations:
+                d = _domain_of(url)
+                if d in allowed and d not in seen_domains:
+                    filtered.append(url)
+                    seen_domains.add(d)
+
+            if filtered:
+                answer_text += "\n\n---\n\n## Sources consultées\n\n"
+                for url in filtered:
+                    d = _domain_of(url)
+                    answer_text += f"- **{d}** — [Consulter la source]({url})\n"
 
         logger.info("Perplexity | réponse générée | citations=%d", len(citations))
         return {

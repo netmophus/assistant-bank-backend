@@ -46,17 +46,33 @@ app = FastAPI(
 )
 
 # Allow all localhost origins for development + production domains
+# origins = [
+#     "http://localhost:3000",
+#     "http://127.0.0.1:3000",
+#     "http://localhost:3001",
+#     "http://127.0.0.1:3001",
+#     "http://localhost:5173",  # Vite default port
+#     "http://127.0.0.1:5173",
+#     "http://localhost:5174",
+#     "http://127.0.0.1:5174",
+#     # Production Heroku
+#     "https://novabank-frontend-f9d4c030d386.herokuapp.com",
+# ]
+
+
 origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
-    "http://localhost:5173",  # Vite default port
+    "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
-    # Production Heroku
     "https://novabank-frontend-f9d4c030d386.herokuapp.com",
+    # Production custom domains
+    "https://www.miznas.co",
+    "https://miznas.co",
 ]
 
 app.add_middleware(
