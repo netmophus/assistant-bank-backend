@@ -103,6 +103,11 @@ def _user_doc_to_public(doc) -> dict:
         "department_name": doc.get("department_name"),  # Sera rempli si fourni
         "service_name": doc.get("service_name"),  # Sera rempli si fourni
         "is_active": doc.get("is_active", True),  # Par défaut actif si non spécifié
+        # Champs DEMO (inscription publique via app.miznas.co)
+        "is_demo": doc.get("is_demo", False),
+        "email_verified": doc.get("email_verified", False),
+        "phone_country_code": doc.get("phone_country_code"),
+        "phone_number": doc.get("phone_number"),
     }
     return result
 
@@ -546,6 +551,47 @@ async def get_agents_by_service(service_id: str) -> List[dict]:
     async for doc in cursor:
         agents.append(_user_doc_to_public(doc))
     return agents
+
+
+async def create_demo_user(data) -> dict:
+    """
+    Crée un user DEMO rattaché automatiquement à l'org et au dept DEMO.
+    Utilisé par l'endpoint POST /auth/register-demo (inscription publique
+    depuis app.miznas.co, phase 1 : pas d'OTP, pas de limites).
+    """
+    from app.core.constants import DEMO_ORG_ID, DEMO_DEPT_ID
+
+    db = get_database()
+    existing = await get_user_by_email(data.email)
+    if existing:
+        raise ValueError("Cet email est déjà utilisé.")
+
+    org_oid = ObjectId(DEMO_ORG_ID)
+    dept_oid = ObjectId(DEMO_DEPT_ID)
+
+    full_name = f"{data.first_name.strip()} {data.last_name.strip()}"
+
+    doc = {
+        "email": data.email,
+        "full_name": full_name,
+        "organization_id": org_oid,
+        "department_id": dept_oid,
+        "service_id": None,
+        "password_hash": hash_password(data.password),
+        "role": "user",
+        "role_departement": "agent",
+        "is_active": True,
+        # Champs DEMO
+        "is_demo": True,
+        "email_verified": False,
+        "phone_country_code": data.phone_country_code.strip(),
+        "phone_number": data.phone_number.strip(),
+        "created_at": datetime.utcnow(),
+    }
+
+    result = await db[USERS_COLLECTION].insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return _user_doc_to_public(doc)
 
 
 async def check_user_hierarchy_permission(

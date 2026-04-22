@@ -44,6 +44,11 @@ class UserPublic(UserBase):
     role: Optional[str] = None  # Rôle système
     role_departement: Optional[str] = None  # Rôle dans le département
     is_active: Optional[bool] = True  # Statut actif/inactif de l'utilisateur
+    # Champs DEMO (inscription publique via app.miznas.co)
+    is_demo: Optional[bool] = None
+    email_verified: Optional[bool] = None
+    phone_country_code: Optional[str] = None
+    phone_number: Optional[str] = None
 
 
 class LoginData(BaseModel):
@@ -66,3 +71,20 @@ class StockUserCreate(UserBase):
     password: str = Field(min_length=6)
     role: str = Field(..., description="Rôle: 'gestionnaire_stock' ou 'agent_stock_drh'")
     department_id: Optional[str] = Field(None, description="ID du département (optionnel pour gestionnaire stock)")
+
+
+class RegisterDemoRequest(BaseModel):
+    """Inscription DEMO via app mobile (phase 1 : pas d'OTP, pas de limites)."""
+    email: EmailStr
+    password: str = Field(min_length=6)
+    first_name: str = Field(min_length=1)
+    last_name: str = Field(min_length=1)
+    phone_country_code: str = Field(min_length=2, description="Ex: +227")
+    phone_number: str = Field(min_length=6)
+
+
+class DemoRegisterResponse(BaseModel):
+    """Réponse de /auth/register-demo : token JWT + user complet."""
+    access_token: str
+    token_type: str = "bearer"
+    user: UserPublic

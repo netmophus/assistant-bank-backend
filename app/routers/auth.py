@@ -8,6 +8,7 @@ from typing import Optional
 from app.core.deps import get_current_user
 from app.core.db import get_database
 from app.core.security import create_access_token, hash_password
+from app.core.constants import DEMO_ORG_ID
 from app.models.department import get_department_by_id, get_service_by_id
 from app.models.license import get_active_license_for_org  # 🔒 nouveau
 from app.models.organization import (
@@ -18,12 +19,22 @@ from app.models.user import (
     count_users_by_org,
     create_user,
     create_user_for_org,
+    create_demo_user,
     list_users,
     list_users_by_org,
     list_users_by_org_with_filters,
     update_user,
 )
-from app.schemas.user import LoginData, Token, UserCreate, UserPublic, UserUpdate, StockUserCreate
+from app.schemas.user import (
+    LoginData,
+    Token,
+    UserCreate,
+    UserPublic,
+    UserUpdate,
+    StockUserCreate,
+    RegisterDemoRequest,
+    DemoRegisterResponse,
+)
 
 router = APIRouter(
     prefix="/auth",
@@ -58,6 +69,58 @@ async def register(user_in: UserCreate):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Erreur lors de la creation du compte: {str(e)}",
         )
+
+
+@router.post("/register-demo", response_model=DemoRegisterResponse)
+async def register_demo(payload: RegisterDemoRequest):
+    """
+    Inscription gratuite DEMO via app mobile (app.miznas.co).
+
+    Rattache automatiquement le user à l'org et au dept DEMO, puis génère
+    un JWT pour connexion immédiate (pas besoin d'un second appel /login).
+
+    Phase 1 : pas d'OTP, pas de limites. Phase 2 ajoutera la vérif email,
+    phase 3 les limites d'inscription par plage horaire / IP.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        user = await create_demo_user(payload)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de l'inscription demo: {str(e)}",
+        )
+
+    logger.info(
+        f"[DEMO_REGISTER] New demo user inscribed: "
+        f"email={payload.email}, "
+        f"phone={payload.phone_country_code}{payload.phone_number}, "
+        f"org={DEMO_ORG_ID}"
+    )
+
+    # JWT avec les memes claims que /login pour compatibilite get_current_user
+    token_data = {
+        "sub": user["id"],
+        "email": user["email"],
+        "role": user["role"],
+        "role_departement": user.get("role_departement", "agent"),
+        "department_id": user["department_id"],
+        "org": user["organization_id"],
+    }
+    access_token = create_access_token(token_data)
+
+    return DemoRegisterResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=UserPublic(**user),
+    )
 
 
 @router.post("/login", response_model=Token)
