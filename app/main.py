@@ -61,6 +61,7 @@ app = FastAPI(
 
 
 origins = [
+    # ─── Dev local — Next.js frontend ───
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
@@ -69,10 +70,25 @@ origins = [
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
-    "https://novabank-frontend-f9d4c030d386.herokuapp.com",
-    # Production custom domains
+
+    # ─── Dev local — Expo Web ───
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+    "http://localhost:19006",
+    "http://127.0.0.1:19006",
+
+    # ─── Production — Next.js (site web) ───
     "https://www.miznas.co",
     "https://miznas.co",
+
+    # ─── Production — Expo Web (app mobile) ───
+    "https://app.miznas.co",
+
+    # ─── Fallback Vercel (sans domaine custom) ───
+    "https://miznas-pilot-mobile.vercel.app",
+
+    # ─── Legacy Heroku frontend ───
+    "https://novabank-frontend-f9d4c030d386.herokuapp.com",
 ]
 
 app.add_middleware(
