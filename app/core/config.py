@@ -38,5 +38,12 @@ class Settings:
     LAM_PASSWORD: str = os.getenv("LAM_PASSWORD", "")
     LAM_SENDER: str = os.getenv("LAM_SENDER", "SOFTLINK")
 
+    # Email de notification pour nouvelles demandes d'abonnement.
+    # Si vide, fallback sur SMTP_USER (l'admin lui-meme).
+    SUBSCRIPTION_NOTIFY_EMAIL: str = os.getenv(
+        "SUBSCRIPTION_NOTIFY_EMAIL",
+        os.getenv("SMTP_USER", ""),
+    )
+
 
 settings = Settings()

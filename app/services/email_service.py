@@ -35,6 +35,47 @@ async def send_email(to_email: str, subject: str, html_body: str) -> None:
     await asyncio.to_thread(_send_sync, to_email, subject, html_body)
 
 
+def subscription_request_notification_html(request: dict) -> str:
+    """Template HTML pour notifier l'admin d'une nouvelle demande d'abonnement."""
+    working = request.get("professional_status") == "working"
+    institution = request.get("institution") or ""
+    institution_line = (
+        f" chez <strong>{institution}</strong>"
+        if working and institution
+        else ""
+    )
+    plan_labels = {
+        "monthly": "MENSUEL (7 500 FCFA/mois)",
+        "semester": "SEMESTRIEL (35 000 FCFA / 6 mois)",
+        "annual": "ANNUEL (60 000 FCFA / an)",
+    }
+    plan_label = plan_labels.get(request.get("plan_requested", ""), request.get("plan_requested", ""))
+    return f"""
+    <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 20px; background: #F8F9FC;">
+      <div style="background: #0F1E48; padding: 20px; border-radius: 12px 12px 0 0; border-bottom: 2px solid #C9A84C;">
+        <h2 style="color: #C9A84C; margin: 0; font-size: 18px; font-weight: 900;">Nouvelle demande d'abonnement Miznas Pilot</h2>
+      </div>
+      <div style="background: #FFFFFF; padding: 24px; border-radius: 0 0 12px 12px; border: 1px solid #E5E7EB; border-top: 0;">
+        <table style="border-collapse: collapse; width: 100%;">
+          <tr><td style="padding: 8px 0; color: #64748B; font-size: 13px; width: 140px;">Prospect :</td><td style="padding: 8px 0; color: #0F1E48; font-weight: 600;">{request.get('first_name', '')} {request.get('last_name', '')}</td></tr>
+          <tr><td style="padding: 8px 0; color: #64748B; font-size: 13px;">Email :</td><td style="padding: 8px 0;"><a href="mailto:{request.get('email', '')}" style="color: #1B3A8C; text-decoration: none;">{request.get('email', '')}</a></td></tr>
+          <tr><td style="padding: 8px 0; color: #64748B; font-size: 13px;">Téléphone :</td><td style="padding: 8px 0; color: #0F1E48;">{request.get('phone_country_code', '')} {request.get('phone_number', '')}</td></tr>
+          <tr><td style="padding: 8px 0; color: #64748B; font-size: 13px;">Localisation :</td><td style="padding: 8px 0; color: #0F1E48;">{request.get('city', '')}, {request.get('country', '')}</td></tr>
+          <tr><td style="padding: 8px 0; color: #64748B; font-size: 13px;">Situation :</td><td style="padding: 8px 0; color: #0F1E48;">{request.get('professional_status', '')}{institution_line}</td></tr>
+          <tr><td style="padding: 8px 0; color: #64748B; font-size: 13px;">Offre demandée :</td><td style="padding: 8px 0;"><span style="background: #C9A84C; color: #0A1434; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 12px; letter-spacing: 0.5px;">{plan_label}</span></td></tr>
+        </table>
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid #E5E7EB;" />
+        <p style="color: #64748B; font-size: 12px; margin: 0;">
+          ID de la demande : <code style="background: #F1F5F9; padding: 2px 6px; border-radius: 4px; color: #0F1E48;">{request.get('id', '')}</code>
+        </p>
+        <p style="color: #64748B; font-size: 12px; margin: 8px 0 0;">
+          Connectez-vous à l'admin Miznas Pilot pour traiter cette demande.
+        </p>
+      </div>
+    </div>
+    """
+
+
 def reset_password_html(reset_link: str, user_name: str = "") -> str:
     name_line = f"<p style='color:#CBD5E1;font-size:15px;'>Bonjour <strong>{user_name}</strong>,</p>" if user_name else ""
     return f"""
