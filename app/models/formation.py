@@ -38,12 +38,29 @@ def _formation_doc_to_public(doc) -> dict:
         bloc_label = f"BLOC {bloc_numero} — {bloc_titre}"
     elif bloc_numero is not None:
         bloc_label = f"BLOC {bloc_numero}"
+
+    # Computed : true si la formation est publiee ET tous les chapitres ont
+    # contenu_genere ET tous les modules ont questions_qcm non vides.
+    # Utilise par l'UI catalogue pour afficher l'etat reel (publiee seule
+    # vs publiee+generee) et activer/desactiver le bouton "Affecter".
+    modules = doc.get("modules", [])
+    is_ready = (
+        doc.get("status") == "published"
+        and bool(modules)
+        and all(
+            m.get("questions_qcm")
+            and all(ch.get("contenu_genere") for ch in m.get("chapitres", []))
+            for m in modules
+        )
+    )
+
     return {
         "id": str(doc["_id"]),
         "titre": doc["titre"],
         "description": doc.get("description"),
         "organization_id": str(doc["organization_id"]),
         "status": doc.get("status", "draft"),
+        "is_ready_to_distribute": is_ready,
         "created_at": doc.get("created_at").isoformat() if doc.get("created_at") and isinstance(doc.get("created_at"), datetime) else None,
         "bloc_numero": bloc_numero,
         "bloc_titre": bloc_titre,

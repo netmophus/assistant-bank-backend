@@ -94,6 +94,10 @@ class FormationPublic(FormationBase):
     id: str
     organization_id: str
     status: str = "draft"  # draft, published, archived
+    is_ready_to_distribute: Optional[bool] = Field(
+        False,
+        description="True si status=published ET tous chapitres ont contenu_genere ET tous modules ont QCM. Utilise par l'UI catalogue."
+    )
     modules: List[ModulePublic] = Field(default_factory=list, description="Liste des modules de la formation")
     modules_count: Optional[int] = 0
     created_at: Optional[str] = None
