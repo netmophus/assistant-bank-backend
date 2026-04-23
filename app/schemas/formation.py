@@ -107,4 +107,10 @@ class FormationPublic(FormationBase):
         None,
         description="Stats de generation IA : content_ok, content_failed, qcm_ok, qcm_failed, errors[]. Seulement present apres /publish avec auto_generate_*."
     )
+    # Utilise par /user/my-formations?include_locked=true pour le teaser catalogue.
+    # True = formation du catalogue presentee en mode aperçu (non accessible).
+    is_locked: Optional[bool] = Field(
+        False,
+        description="True = formation teaser non accessible (affichee en gris cote UI)."
+    )
 

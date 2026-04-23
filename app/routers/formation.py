@@ -185,10 +185,20 @@ async def update_formation_endpoint(
 # -----------------------------------------------------------------------------
 
 @router.get("/user/my-formations", response_model=list[FormationPublic])
-async def get_my_formations(current_user: dict = Depends(get_current_user)):
+async def get_my_formations(
+    include_locked: bool = Query(
+        False,
+        description="Si true, inclut aussi les formations du catalogue non accessibles (mode teaser — affichees en gris cote UI).",
+    ),
+    current_user: dict = Depends(get_current_user),
+):
     """
     Liste les formations disponibles pour l'utilisateur connecté.
-    Retourne uniquement les formations publiées et assignées à son département.
+
+    - Par défaut : formations publiées assignées à son département (accessibles).
+    - Avec `include_locked=true` : ajoute les formations du catalogue (CATALOGUE)
+      qui sont publiées + prêtes à distribuer, marquées `is_locked=true`.
+      Utilisé par les apps mobiles en mode "teaser commercial".
     """
     from app.models.formation_assignment import get_formations_for_department
 
@@ -201,32 +211,80 @@ async def get_my_formations(current_user: dict = Depends(get_current_user)):
             detail="Vous devez être associé à une organisation pour voir les formations.",
         )
 
-    # Si l'utilisateur a un département, récupérer les formations assignées à ce département
+    # ── 1. Recuperer les formations ACCESSIBLES de l'user ──
+    accessible: list[dict] = []
+
     if user_dept_id:
-        # Récupérer les IDs des formations assignées au département ET de l'organisation
         assigned_formations = await get_formations_for_department(str(user_dept_id), str(user_org_id))
         formation_ids = [f["id"] for f in assigned_formations]
 
-        if not formation_ids:
+        if formation_ids:
+            for formation_info in assigned_formations:
+                fid = formation_info.get("id")
+                if fid:
+                    formation = await get_formation_by_id(fid)
+                    if formation and formation.get("status") == "published":
+                        accessible.append(formation)
+        else:
             formations = await list_formations_by_org(str(user_org_id))
-            published_formations = [f for f in formations if f.get("status") == "published"]
-            return published_formations
-
-        # Récupérer les formations complètes avec tous leurs détails (modules, chapitres, contenu généré, QCM)
-        formations = []
-        for formation_info in assigned_formations:
-            formation_id = formation_info.get("id")
-            if formation_id:
-                formation = await get_formation_by_id(formation_id)
-                if formation and formation.get("status") == "published":
-                    formations.append(formation)
-
-        return formations
+            accessible = [f for f in formations if f.get("status") == "published"]
     else:
-        # Si l'utilisateur n'a pas de département, retourner toutes les formations publiées de l'organisation
         formations = await list_formations_by_org(str(user_org_id))
-        published_formations = [f for f in formations if f.get("status") == "published"]
-        return published_formations
+        accessible = [f for f in formations if f.get("status") == "published"]
+
+    # Flag explicite is_locked=False sur les accessibles
+    for f in accessible:
+        f["is_locked"] = False
+
+    # ── 2. Si include_locked=true, ajouter les formations teaser du catalogue ──
+    if not include_locked:
+        return accessible
+
+    db = get_database()
+    catalogue_org = await db["organizations"].find_one({"code": "CATALOGUE"})
+    if not catalogue_org:
+        return accessible
+
+    # Si l'user est deja de l'org CATALOGUE, pas de teaser (il a deja tout le catalogue)
+    if str(catalogue_org["_id"]) == str(user_org_id):
+        return accessible
+
+    # Titres des formations deja accessibles (evite les doublons dans le teaser).
+    # Match par titre car les copies CATALOGUE -> org ont de nouveaux _id mais
+    # gardent le titre original.
+    accessible_titles = {(f.get("titre") or "").strip().lower() for f in accessible}
+
+    # Lister les formations CATALOGUE publiees + pretes + pas encore accessibles
+    cat_formations = await list_formations_by_org(str(catalogue_org["_id"]))
+    locked_previews: list[dict] = []
+    for f in cat_formations:
+        if f.get("status") != "published":
+            continue
+        if not f.get("is_ready_to_distribute"):
+            continue
+        titre_key = (f.get("titre") or "").strip().lower()
+        if titre_key in accessible_titles:
+            continue
+
+        # Preview minimal : on ne revele PAS le contenu genere (modules vides)
+        preview = {
+            "id": f.get("id"),
+            "titre": f.get("titre", ""),
+            "description": f.get("description"),
+            "organization_id": f.get("organization_id", ""),
+            "status": "published",
+            "is_ready_to_distribute": True,
+            "is_locked": True,
+            "modules": [],
+            "modules_count": f.get("modules_count") or 0,
+            "bloc_numero": f.get("bloc_numero"),
+            "bloc_titre": f.get("bloc_titre"),
+            "bloc_label": f.get("bloc_label"),
+            "created_at": f.get("created_at"),
+        }
+        locked_previews.append(preview)
+
+    return accessible + locked_previews
 
 
 # -----------------------------------------------------------------------------
