@@ -102,4 +102,9 @@ class FormationPublic(FormationBase):
     modules_count: Optional[int] = 0
     created_at: Optional[str] = None
     bloc_label: Optional[str] = Field(None, description="Label complet: BLOC N — Titre")
+    # Rempli uniquement par publish_formation quand auto_generate_* est demande
+    generation_stats: Optional[dict] = Field(
+        None,
+        description="Stats de generation IA : content_ok, content_failed, qcm_ok, qcm_failed, errors[]. Seulement present apres /publish avec auto_generate_*."
+    )
 

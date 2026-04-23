@@ -281,6 +281,17 @@ async def publish_formation(
                 detail="Formation introuvable.",
             )
 
+        # Stats accumulees durant la generation (retournees dans la reponse).
+        gen_stats = {
+            "content_ok": 0,
+            "content_failed": 0,
+            "content_skipped_already_done": 0,
+            "qcm_ok": 0,
+            "qcm_failed": 0,
+            "qcm_skipped_already_done": 0,
+            "errors": [],
+        }
+
         # Générer automatiquement le contenu si demandé
         if auto_generate_content:
             db = get_database()
@@ -288,68 +299,20 @@ async def publish_formation(
 
             for module in formation.get("modules", []):
                 for chapitre in module.get("chapitres", []):
-                    # Générer le contenu seulement si pas déjà généré
-                    if not chapitre.get("contenu_genere"):
-                        try:
-                            parties = chapitre.get("parties", [])
-                            if parties and any(p.get("contenu") for p in parties):
-                                generated_content = await generate_chapitre_content(
-                                    introduction=chapitre.get("introduction", ""),
-                                    parties=parties,
-                                    formation_titre=formation.get("titre", ""),
-                                    module_titre=module.get("titre", ""),
-                                    chapitre_titre=chapitre.get("titre", ""),
-                                )
-
-                                # Mettre à jour dans la base de données
-                                formation_doc = await db["formations"].find_one(
-                                    {"_id": formation_oid}
-                                )
-                                if formation_doc:
-                                    modules = formation_doc.get("modules", [])
-                                    for m in modules:
-                                        if str(m["_id"]) == module["id"]:
-                                            chapitres = m.get("chapitres", [])
-                                            for ch in chapitres:
-                                                if str(ch["_id"]) == chapitre["id"]:
-                                                    ch["contenu_genere"] = (
-                                                        generated_content
-                                                    )
-                                                    break
-                                            m["chapitres"] = chapitres
-                                            break
-
-                                    await db["formations"].update_one(
-                                        {"_id": formation_oid},
-                                        {"$set": {"modules": modules}},
-                                    )
-                        except Exception as e:
-                            print(
-                                f"Erreur lors de la génération du contenu pour le chapitre {chapitre.get('id')}: {e}"
-                            )
-                            # Continuer avec les autres chapitres même en cas d'erreur
-
-        # Générer automatiquement les QCM si demandé
-        if auto_generate_qcm:
-            db = get_database()
-            formation_oid = ObjectId(formation_id)
-
-            for module in formation.get("modules", []):
-                # Générer les QCM seulement si pas déjà générés
-                if (
-                    not module.get("questions_qcm")
-                    or len(module.get("questions_qcm", [])) == 0
-                ):
+                    if chapitre.get("contenu_genere"):
+                        gen_stats["content_skipped_already_done"] += 1
+                        continue
                     try:
-                        chapitres = module.get("chapitres", [])
-                        if chapitres:
-                            questions = await generate_qcm_questions(
+                        parties = chapitre.get("parties", [])
+                        if parties and any(p.get("contenu") for p in parties):
+                            generated_content = await generate_chapitre_content(
+                                introduction=chapitre.get("introduction", ""),
+                                parties=parties,
+                                formation_titre=formation.get("titre", ""),
                                 module_titre=module.get("titre", ""),
-                                chapitres=chapitres,
-                                nombre_questions=5,
+                                chapitre_titre=chapitre.get("titre", ""),
                             )
 
-                            # Mettre à jour dans la base de données
                             formation_doc = await db["formations"].find_one(
                                 {"_id": formation_oid}
                             )
@@ -357,22 +320,85 @@ async def publish_formation(
                                 modules = formation_doc.get("modules", [])
                                 for m in modules:
                                     if str(m["_id"]) == module["id"]:
-                                        m["questions_qcm"] = questions
+                                        chapitres = m.get("chapitres", [])
+                                        for ch in chapitres:
+                                            if str(ch["_id"]) == chapitre["id"]:
+                                                ch["contenu_genere"] = generated_content
+                                                break
+                                        m["chapitres"] = chapitres
                                         break
 
                                 await db["formations"].update_one(
                                     {"_id": formation_oid},
                                     {"$set": {"modules": modules}},
                                 )
+                            gen_stats["content_ok"] += 1
                     except Exception as e:
-                        print(
-                            f"Erreur lors de la génération des QCM pour le module {module.get('id')}: {e}"
+                        gen_stats["content_failed"] += 1
+                        err_msg = (
+                            f"Chapitre '{chapitre.get('titre', '?')}' "
+                            f"(module '{module.get('titre', '?')}') : "
+                            f"{type(e).__name__}: {str(e)[:120]}"
                         )
-                        # Continuer avec les autres modules même en cas d'erreur
+                        gen_stats["errors"].append(err_msg)
+                        logger.warning(
+                            f"[FORMATIONS] Echec generation contenu — formation={formation_id} "
+                            f"— {err_msg}"
+                        )
+                        # Continuer avec les autres chapitres même en cas d'erreur
+
+        # Générer automatiquement les QCM si demandé
+        if auto_generate_qcm:
+            db = get_database()
+            formation_oid = ObjectId(formation_id)
+
+            for module in formation.get("modules", []):
+                if module.get("questions_qcm") and len(module.get("questions_qcm", [])) > 0:
+                    gen_stats["qcm_skipped_already_done"] += 1
+                    continue
+                try:
+                    chapitres = module.get("chapitres", [])
+                    if chapitres:
+                        questions = await generate_qcm_questions(
+                            module_titre=module.get("titre", ""),
+                            chapitres=chapitres,
+                            nombre_questions=5,
+                        )
+
+                        formation_doc = await db["formations"].find_one(
+                            {"_id": formation_oid}
+                        )
+                        if formation_doc:
+                            modules = formation_doc.get("modules", [])
+                            for m in modules:
+                                if str(m["_id"]) == module["id"]:
+                                    m["questions_qcm"] = questions
+                                    break
+
+                            await db["formations"].update_one(
+                                {"_id": formation_oid},
+                                {"$set": {"modules": modules}},
+                            )
+                        gen_stats["qcm_ok"] += 1
+                except Exception as e:
+                    gen_stats["qcm_failed"] += 1
+                    err_msg = (
+                        f"QCM module '{module.get('titre', '?')}' : "
+                        f"{type(e).__name__}: {str(e)[:120]}"
+                    )
+                    gen_stats["errors"].append(err_msg)
+                    logger.warning(
+                        f"[FORMATIONS] Echec generation QCM — formation={formation_id} "
+                        f"— {err_msg}"
+                    )
+                    # Continuer avec les autres modules même en cas d'erreur
 
         # Publier la formation
         update_data = {"status": "published"}
         formation = await update_formation(formation_id, update_data, str(user_org_id))
+        # Attacher les stats de generation a la reponse
+        if auto_generate_content or auto_generate_qcm:
+            formation["generation_stats"] = gen_stats
         return formation
     except ValueError as e:
         raise HTTPException(
