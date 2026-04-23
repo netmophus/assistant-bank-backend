@@ -16,10 +16,13 @@ Vue d'ensemble du flux:
   - Endpoints "lecture" / génération ponctuelle (contenu chapitre/partie, suggestions)
 """
 
+import logging
 from datetime import datetime
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+logger = logging.getLogger(__name__)
 
 from app.core.db import get_database
 from app.core.deps import get_current_user
@@ -253,6 +256,21 @@ async def publish_formation(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Seuls les administrateurs d'organisation peuvent publier les formations.",
         )
+
+    # Seule l'org CATALOGUE peut declencher la generation IA. Les autres orgs
+    # recoivent leurs formations deja generees via /formations/{id}/assign
+    # (push CATALOGUE -> org). On ignore silencieusement les flags ici.
+    if auto_generate_content or auto_generate_qcm:
+        db_check = get_database()
+        if not await _is_catalogue_admin(current_user, db_check):
+            logger.warning(
+                f"[FORMATIONS] Org non-CATALOGUE {user_org_id} a demande "
+                f"auto_generate (content={auto_generate_content}, "
+                f"qcm={auto_generate_qcm}) — ignore. Seule l'org CATALOGUE "
+                f"peut declencher la generation IA."
+            )
+            auto_generate_content = False
+            auto_generate_qcm = False
 
     try:
         # Récupérer la formation avant publication
@@ -888,6 +906,15 @@ async def generate_qcm_for_module_endpoint(
             detail="Seuls les administrateurs d'organisation peuvent générer des QCM.",
         )
 
+    # Seule l'org CATALOGUE peut declencher la generation IA.
+    db_check = get_database()
+    if not await _is_catalogue_admin(current_user, db_check):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La regeneration de QCM est reservee a l'organisation "
+                   "CATALOGUE. Contactez l'administrateur du catalogue.",
+        )
+
     # Récupérer la formation
     formation = await get_formation_by_id(formation_id)
     if not formation:
@@ -975,6 +1002,15 @@ async def generate_chapitre_content_endpoint(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Seuls les administrateurs d'organisation peuvent générer du contenu.",
+        )
+
+    # Seule l'org CATALOGUE peut declencher la generation IA.
+    db_check = get_database()
+    if not await _is_catalogue_admin(current_user, db_check):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La regeneration de contenu est reservee a l'organisation "
+                   "CATALOGUE. Contactez l'administrateur du catalogue.",
         )
 
     # Récupérer la formation
@@ -1166,6 +1202,42 @@ async def assign_formation_to_orgs(
     if not source:
         raise HTTPException(status_code=404, detail="Formation introuvable.")
 
+    # C: Refuser la distribution d'une formation non publiee.
+    if source.get("status") != "published":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cette formation est en brouillon. Veuillez la publier "
+                   "et generer son contenu avant de la distribuer aux "
+                   "organisations clientes.",
+        )
+
+    # BONUS: Refuser la distribution si le contenu est incomplet.
+    # On checke 2 niveaux : chapitre.contenu_genere + module.questions_qcm.
+    # partie.contenu_genere n'est PAS checke (vide par design, rempli
+    # on-demand via /generate-content-user si besoin).
+    missing: list[str] = []
+    for m in source.get("modules", []):
+        m_titre = m.get("titre", "?")
+        if not m.get("questions_qcm"):
+            missing.append(f"QCM manquant: module '{m_titre}'")
+        for ch in m.get("chapitres", []):
+            if not ch.get("contenu_genere"):
+                missing.append(
+                    f"Contenu manquant: chapitre '{ch.get('titre', '?')}' "
+                    f"(module '{m_titre}')"
+                )
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Cette formation a des sections sans contenu "
+                           "genere. Regenerez le contenu manquant avant de "
+                           "distribuer.",
+                "missing": missing[:20],
+                "total_missing": len(missing),
+            },
+        )
+
     results = []
     for org_id in org_ids:
         try:
@@ -1199,6 +1271,9 @@ async def assign_formation_to_orgs(
         doc.pop("_id")
         doc["organization_id"] = target_oid
         doc["created_at"] = datetime.utcnow()
+        # B: la copie arrive directement publiee dans l'org cliente,
+        # plug-and-play — pas de double-validation par l'admin cible.
+        doc["status"] = "published"
 
         for m in doc.get("modules", []):
             m["_id"] = ObjectId()
