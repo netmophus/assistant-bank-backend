@@ -76,6 +76,97 @@ def subscription_request_notification_html(request: dict) -> str:
     """
 
 
+def institution_demo_notification_html(request: dict) -> str:
+    """Template HTML pour notifier l'admin d'une nouvelle demande de demo institution."""
+    function_labels = {
+        "dg": "Direction Generale",
+        "drh": "DRH",
+        "dsi": "DSI",
+        "risques": "Direction des Risques",
+        "credit": "Direction du Credit",
+        "conformite": "Conformite",
+        "autre": "Autre",
+    }
+    type_labels = {
+        "banque_commerciale": "Banque commerciale",
+        "sfd": "SFD",
+        "microfinance": "Microfinance",
+        "assurance": "Compagnie d'assurance",
+        "autre": "Autre",
+    }
+    module_labels = {
+        "credit": "Analyse de credit",
+        "impayes": "Gestion des impayes",
+        "pcb": "Etats financiers PCB UEMOA",
+        "all": "Tous les modules",
+    }
+
+    function_label = function_labels.get(
+        request.get("function", ""), request.get("function", "")
+    )
+    type_label = type_labels.get(
+        request.get("institution_type", ""),
+        request.get("institution_type", ""),
+    )
+    modules = request.get("modules_interest", []) or []
+    modules_str = ", ".join(module_labels.get(m, m) for m in modules)
+
+    message_block = ""
+    if request.get("message"):
+        message_block = f"""
+        <hr style="margin: 16px 0; border: 0; border-top: 1px solid #E5E7EB;" />
+        <p style="margin: 0 0 6px; color: #64748B; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">
+          Message du prospect
+        </p>
+        <p style="margin: 0; color: #0F1E48; font-size: 13px; line-height: 1.6; white-space: pre-line;">
+          {request.get('message')}
+        </p>
+        """
+
+    return f"""
+    <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; padding: 20px; background: #F8F9FC;">
+      <div style="background: #0F1E48; padding: 22px; border-radius: 12px 12px 0 0; border-bottom: 2px solid #C9A84C;">
+        <p style="margin: 0 0 4px; color: #C9A84C; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;">
+          B2B — Demande de demonstration
+        </p>
+        <h2 style="color: #FFFFFF; margin: 0; font-size: 19px; font-weight: 900;">
+          {request.get('institution_name', '')}
+        </h2>
+      </div>
+      <div style="background: #FFFFFF; padding: 24px; border-radius: 0 0 12px 12px; border: 1px solid #E5E7EB; border-top: 0;">
+
+        <p style="margin: 0 0 12px; color: #64748B; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">
+          Institution
+        </p>
+        <table style="border-collapse: collapse; width: 100%; margin-bottom: 18px;">
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px; width: 160px;">Type :</td><td style="padding: 6px 0; color: #0F1E48; font-weight: 600;">{type_label}</td></tr>
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px;">Pays :</td><td style="padding: 6px 0; color: #0F1E48;">{request.get('country', '')}</td></tr>
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px;">Effectif estime :</td><td style="padding: 6px 0; color: #0F1E48;">{request.get('estimated_users', '')} utilisateurs</td></tr>
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px;">Modules d'interet :</td><td style="padding: 6px 0;"><span style="background: #C9A84C; color: #0A1434; padding: 4px 10px; border-radius: 6px; font-weight: 700; font-size: 12px;">{modules_str}</span></td></tr>
+        </table>
+
+        <p style="margin: 0 0 12px; color: #64748B; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">
+          Contact
+        </p>
+        <table style="border-collapse: collapse; width: 100%;">
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px; width: 160px;">Nom :</td><td style="padding: 6px 0; color: #0F1E48; font-weight: 600;">{request.get('first_name', '')} {request.get('last_name', '')}</td></tr>
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px;">Fonction :</td><td style="padding: 6px 0; color: #0F1E48;">{function_label}</td></tr>
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px;">Email :</td><td style="padding: 6px 0;"><a href="mailto:{request.get('email', '')}" style="color: #1B3A8C; text-decoration: none;">{request.get('email', '')}</a></td></tr>
+          <tr><td style="padding: 6px 0; color: #64748B; font-size: 13px;">Telephone :</td><td style="padding: 6px 0; color: #0F1E48;">{request.get('phone_country_code', '')} {request.get('phone_number', '')}</td></tr>
+        </table>
+        {message_block}
+        <hr style="margin: 20px 0 16px; border: 0; border-top: 1px solid #E5E7EB;" />
+        <p style="color: #64748B; font-size: 12px; margin: 0;">
+          ID : <code style="background: #F1F5F9; padding: 2px 6px; border-radius: 4px; color: #0F1E48;">{request.get('id', '')}</code>
+        </p>
+        <p style="color: #64748B; font-size: 12px; margin: 8px 0 0;">
+          Connectez-vous a l'admin Miznas Pilot pour traiter cette demande.
+        </p>
+      </div>
+    </div>
+    """
+
+
 def verification_otp_html(code: str, user_name: str = "") -> str:
     """Template HTML pour l'OTP de vérification email (inscription DEMO)."""
     name_line = (
