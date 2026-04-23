@@ -14,19 +14,39 @@ QUOTA_LIMIT = 60  # quota par défaut (60 questions/mois)
 
 async def get_quota_limit_for_user(user_id: str) -> int:
     """Retourne le quota mensuel applicable à l'utilisateur.
-    Si son organisation a un quota personnalisé (question_quota), on l'utilise.
-    Sinon, on retourne le quota par défaut (60).
+
+    Priorité de lecture :
+      1. organizations.quotas_config.default_user_quota  (defini par l'admin via UI)
+      2. organizations.question_quota                    (legacy flat field, retro-compat)
+      3. QUOTA_LIMIT                                     (fallback hardcode = 60)
+
+    Note : les exceptions par department, service ou user
+    (organizations.quotas_config.{department_quotas, service_quotas, user_exceptions})
+    ne sont pas encore appliquees ici — todo separe.
     """
     db = get_database()
     try:
         user_oid = ObjectId(user_id)
         user = await db["users"].find_one({"_id": user_oid})
         if user and user.get("organization_id"):
-            org = await db["organizations"].find_one({"_id": ObjectId(str(user["organization_id"]))})
-            if org and org.get("question_quota") is not None:
-                return int(org["question_quota"])
+            org = await db["organizations"].find_one(
+                {"_id": ObjectId(str(user["organization_id"]))}
+            )
+            if org:
+                # 1. Source de verite courante : quotas_config.default_user_quota
+                quotas_config = org.get("quotas_config")
+                if isinstance(quotas_config, dict):
+                    duq = quotas_config.get("default_user_quota")
+                    if duq is not None:
+                        return int(duq)
+
+                # 2. Legacy : question_quota (champ flat)
+                if org.get("question_quota") is not None:
+                    return int(org["question_quota"])
     except Exception:
         pass
+
+    # 3. Fallback hardcode
     return QUOTA_LIMIT
 
 

@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, Dict, Any
 from datetime import datetime
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -8,6 +9,22 @@ from app.core.deps import get_current_user
 from app.core.db import get_database
 
 logger = logging.getLogger(__name__)
+
+
+def _to_org_oid(org_id) -> Optional[ObjectId]:
+    """
+    Cast l'organization_id (qui peut etre une string depuis le JWT ou deja
+    un ObjectId) en ObjectId. Renvoie None si invalide.
+    Necessaire pour eviter de creer des docs parasites avec _id en string.
+    """
+    if org_id is None:
+        return None
+    if isinstance(org_id, ObjectId):
+        return org_id
+    try:
+        return ObjectId(str(org_id))
+    except Exception:
+        return None
 
 router = APIRouter(
     prefix="/ai-config",
@@ -360,33 +377,29 @@ async def get_quotas_config(
                 "user_exceptions": []
             }
         
-        # Récupérer la configuration depuis la collection organizations
-        org = await db["organizations"].find_one({"_id": org_id})
-        
-        if not org:
-            logger.warning(f"Organisation {org_id} non trouvée pour l'utilisateur {current_user.get('id')} - création d'une configuration par défaut")
-            # Créer une configuration par défaut pour cette organisation
-            default_config = {
-                "global_quota": 1000,
-                "default_user_quota": 100,
-                "department_quotas": [],
-                "service_quotas": [],
-                "user_exceptions": []
-            }
-            
-            # Insérer la configuration par défaut dans l'organisation
-            await db["organizations"].update_one(
-                {"_id": org_id},
-                {"$set": {"quotas_config": default_config}}
+        # Cast org_id en ObjectId pour eviter de creer un doc parasite avec _id string
+        org_oid = _to_org_oid(org_id)
+        if org_oid is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"organization_id invalide: {org_id}",
             )
-            
-            return default_config
-        
+
+        # Récupérer la configuration depuis la collection organizations
+        org = await db["organizations"].find_one({"_id": org_oid})
+
+        if not org:
+            logger.error(f"Organisation {org_id} non trouvée — aucune config quotas retournée")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organisation introuvable.",
+            )
+
         # Retourner la configuration existante
         config = org.get("quotas_config")
         if config:
             return config
-        
+
         # Si aucune configuration n'existe, créer la configuration par défaut
         logger.info(f"Aucune configuration trouvée pour l'organisation {org_id} - création de la configuration par défaut")
         default_config = {
@@ -396,12 +409,12 @@ async def get_quotas_config(
             "service_quotas": [],
             "user_exceptions": []
         }
-        
+
         await db["organizations"].update_one(
-            {"_id": org_id},
+            {"_id": org_oid},
             {"$set": {"quotas_config": default_config}}
         )
-        
+
         return default_config
         
     except Exception as e:
@@ -464,24 +477,32 @@ async def update_quotas_config(
                     detail="Le quota d'utilisateur doit être entre 0 et 1000, ou null pour illimité"
                 )
         
+        # Cast org_id en ObjectId. Sans ca, l'update_one cherche par string,
+        # ne trouve rien, et le bloc d'insert_one ci-dessous creait jadis un
+        # doc parasite avec _id en string (bug DEMO).
+        org_oid = _to_org_oid(org_id)
+        if org_oid is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"organization_id invalide: {org_id}",
+            )
+
         # Mettre à jour la configuration dans l'organisation
         result = await db["organizations"].update_one(
-            {"_id": org_id},
+            {"_id": org_oid},
             {"$set": {"quotas_config": config.dict()}}
         )
-        
+
         if result.matched_count == 0:
-            logger.warning(f"Organisation {org_id} non trouvée lors de la mise à jour - création de l'organisation avec configuration")
-            # Si l'organisation n'existe pas, la créer avec la configuration
-            await db["organizations"].insert_one({
-                "_id": org_id,
-                "quotas_config": config.dict(),
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow()
-            })
-        else:
-            logger.info(f"Configuration quotas mise à jour pour l'organisation {org_id}")
-        
+            # Ne JAMAIS creer un doc parasite ici. Si l'org n'existe pas
+            # c'est une vraie erreur d'integrite — on remonte 404.
+            logger.error(f"Organisation {org_id} non trouvée lors de la sauvegarde des quotas")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organisation introuvable.",
+            )
+
+        logger.info(f"Configuration quotas mise à jour pour l'organisation {org_id}")
         return {"message": "Configuration mise à jour avec succès"}
         
     except HTTPException:
