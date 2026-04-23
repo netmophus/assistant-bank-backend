@@ -25,6 +25,14 @@ from app.models.user import (
     list_users_by_org_with_filters,
     update_user,
 )
+from app.models.otp import (
+    OtpVerificationError,
+    create_or_replace_otp,
+    can_resend_otp,
+    update_resend_timestamp,
+    verify_otp,
+    OTP_RESEND_COOLDOWN_SECONDS,
+)
 from app.schemas.user import (
     LoginData,
     Token,
@@ -34,7 +42,11 @@ from app.schemas.user import (
     StockUserCreate,
     RegisterDemoRequest,
     DemoRegisterResponse,
+    RegisterDemoResponse,
+    VerifyOtpRequest,
+    ResendOtpRequest,
 )
+from app.services.email_service import send_email, verification_otp_html
 
 router = APIRouter(
     prefix="/auth",
@@ -71,16 +83,14 @@ async def register(user_in: UserCreate):
         )
 
 
-@router.post("/register-demo", response_model=DemoRegisterResponse)
+@router.post("/register-demo", response_model=RegisterDemoResponse)
 async def register_demo(payload: RegisterDemoRequest):
     """
     Inscription gratuite DEMO via app mobile (app.miznas.co).
 
-    Rattache automatiquement le user à l'org et au dept DEMO, puis génère
-    un JWT pour connexion immédiate (pas besoin d'un second appel /login).
-
-    Phase 1 : pas d'OTP, pas de limites. Phase 2 ajoutera la vérif email,
-    phase 3 les limites d'inscription par plage horaire / IP.
+    Étape 1/2 : crée le user (email_verified=false) et envoie un code OTP
+    à 6 chiffres par email. Aucun JWT n'est retourné ici — l'utilisateur
+    doit d'abord valider son email via POST /auth/verify-otp.
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -98,29 +108,180 @@ async def register_demo(payload: RegisterDemoRequest):
             detail=f"Erreur lors de l'inscription demo: {str(e)}",
         )
 
+    # Génération + envoi de l'OTP
+    try:
+        code = await create_or_replace_otp(payload.email)
+        html = verification_otp_html(code, user.get("full_name", ""))
+        await send_email(
+            payload.email,
+            "Votre code de vérification — Miznas Pilot",
+            html,
+        )
+    except Exception:
+        logger.error(
+            f"[REGISTER_DEMO] Echec envoi OTP a {payload.email}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Inscription enregistrée mais l'envoi du code de vérification a "
+                "échoué. Utilisez « Renvoyer le code » dans quelques instants."
+            ),
+        )
+
     logger.info(
-        f"[DEMO_REGISTER] New demo user inscribed: "
+        f"[DEMO_REGISTER] New demo user inscribed (OTP sent): "
         f"email={payload.email}, "
         f"phone={payload.phone_country_code}{payload.phone_number}, "
         f"org={DEMO_ORG_ID}"
     )
 
-    # JWT avec les memes claims que /login pour compatibilite get_current_user
+    return RegisterDemoResponse(
+        success=True,
+        message="Compte créé. Un code de vérification a été envoyé par email.",
+        email=payload.email,
+        requires_otp_verification=True,
+    )
+
+
+@router.post("/verify-otp", response_model=DemoRegisterResponse)
+async def verify_demo_otp(payload: VerifyOtpRequest):
+    """
+    Étape 2/2 de l'inscription DEMO : valide le code OTP reçu par email,
+    bascule email_verified=true et retourne un JWT pour connexion immédiate.
+    """
+    from app.models.user import get_user_by_email
+
+    try:
+        await verify_otp(payload.email, payload.code)
+    except OtpVerificationError as e:
+        # Code 410 GONE pour les cas "plus récupérables" (expiré/épuisé/absent),
+        # 400 BAD REQUEST pour un code simplement incorrect.
+        http_status = (
+            status.HTTP_400_BAD_REQUEST
+            if e.code == "INVALID_CODE"
+            else status.HTTP_410_GONE
+        )
+        raise HTTPException(
+            status_code=http_status,
+            detail={"code": e.code, "message": e.message},
+        )
+
+    user_doc = await get_user_by_email(payload.email)
+    if not user_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur introuvable.",
+        )
+
+    # Bascule email_verified=true
+    db = get_database()
+    await db["users"].update_one(
+        {"_id": user_doc["_id"]},
+        {"$set": {"email_verified": True}},
+    )
+
+    # JWT (mêmes claims que /login)
+    org_id = (
+        str(user_doc["organization_id"])
+        if user_doc.get("organization_id")
+        else None
+    )
+    dept_id = (
+        str(user_doc["department_id"])
+        if user_doc.get("department_id")
+        else None
+    )
     token_data = {
-        "sub": user["id"],
-        "email": user["email"],
-        "role": user["role"],
-        "role_departement": user.get("role_departement", "agent"),
-        "department_id": user["department_id"],
-        "org": user["organization_id"],
+        "sub": str(user_doc["_id"]),
+        "email": user_doc["email"],
+        "role": user_doc.get("role", "user"),
+        "role_departement": user_doc.get("role_departement", "agent"),
+        "department_id": dept_id,
     }
+    if org_id:
+        token_data["org"] = org_id
+
     access_token = create_access_token(token_data)
+
+    # Enrichit le doc pour UserPublic (id + email_verified=true)
+    user_public = {
+        "id": str(user_doc["_id"]),
+        "email": user_doc["email"],
+        "full_name": user_doc.get("full_name", ""),
+        "organization_id": org_id,
+        "department_id": dept_id,
+        "service_id": str(user_doc["service_id"]) if user_doc.get("service_id") else None,
+        "role": user_doc.get("role"),
+        "role_departement": user_doc.get("role_departement"),
+        "is_active": user_doc.get("is_active", True),
+        "is_demo": user_doc.get("is_demo", False),
+        "email_verified": True,
+        "phone_country_code": user_doc.get("phone_country_code"),
+        "phone_number": user_doc.get("phone_number"),
+    }
 
     return DemoRegisterResponse(
         access_token=access_token,
         token_type="bearer",
-        user=UserPublic(**user),
+        user=UserPublic(**user_public),
     )
+
+
+@router.post("/resend-otp")
+async def resend_demo_otp(payload: ResendOtpRequest):
+    """
+    Renvoie un nouveau code OTP pour un email donné.
+    Cooldown de 60s entre deux envois. Réponse volontairement neutre
+    (ne révèle pas si l'email existe ou non).
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    from app.models.user import get_user_by_email
+
+    ok_response = {
+        "message": "Si un compte en attente de vérification existe pour cet email, un nouveau code a été envoyé.",
+    }
+
+    # Cooldown check (basé sur le doc OTP, ne révèle rien)
+    allowed, remaining = await can_resend_otp(payload.email)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "COOLDOWN_ACTIVE",
+                "message": f"Patientez {remaining}s avant de redemander un code.",
+                "retry_after_seconds": remaining,
+            },
+        )
+
+    user = await get_user_by_email(payload.email)
+    # Silencieux si email inconnu OU déjà vérifié (anti-enumération)
+    if not user or user.get("email_verified") is True or not user.get("is_demo"):
+        return ok_response
+
+    try:
+        code = await create_or_replace_otp(payload.email)
+        html = verification_otp_html(code, user.get("full_name", ""))
+        await send_email(
+            payload.email,
+            "Votre code de vérification — Miznas Pilot",
+            html,
+        )
+        await update_resend_timestamp(payload.email)
+    except Exception:
+        logger.error(
+            f"[RESEND_OTP] Echec envoi OTP a {payload.email}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Impossible d'envoyer le code pour le moment. Réessayez plus tard.",
+        )
+
+    return ok_response
 
 
 @router.post("/login", response_model=Token)
@@ -136,6 +297,17 @@ async def login(data: LoginData):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email ou mot de passe incorrect.",
+        )
+
+    # 1bis) Bloquer les users DEMO dont l'email n'est pas encore vérifié
+    if user.get("is_demo") is True and not user.get("email_verified", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "EMAIL_NOT_VERIFIED",
+                "message": "Votre email n'a pas encore été vérifié. Saisissez le code reçu par email.",
+                "email": user.get("email"),
+            },
         )
 
     # 2) Vérifier si c'est un super admin (rôle "superadmin")

@@ -37,6 +37,7 @@ from app.routers.credit_pme_policy import router as credit_pme_policy_router
 from app.routers.public_subscription import router as public_subscription_router
 from app.routers.admin_subscription import router as admin_subscription_router
 from app.models.subscription_request import ensure_subscription_request_indexes
+from app.models.otp import ensure_otp_indexes
 
 # Configure logging
 logging.basicConfig(
@@ -148,3 +149,4 @@ app.include_router(admin_subscription_router)
 @app.on_event("startup")
 async def _ensure_indexes():
     await ensure_subscription_request_indexes()
+    await ensure_otp_indexes()

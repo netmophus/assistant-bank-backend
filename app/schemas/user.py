@@ -84,7 +84,24 @@ class RegisterDemoRequest(BaseModel):
 
 
 class DemoRegisterResponse(BaseModel):
-    """Réponse de /auth/register-demo : token JWT + user complet."""
+    """Réponse de /auth/verify-otp : token JWT + user complet (après validation email)."""
     access_token: str
     token_type: str = "bearer"
     user: UserPublic
+
+
+class RegisterDemoResponse(BaseModel):
+    """Réponse de /auth/register-demo : aucun JWT, l'utilisateur doit d'abord valider son email."""
+    success: bool = True
+    message: str
+    email: EmailStr
+    requires_otp_verification: bool = True
+
+
+class VerifyOtpRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class ResendOtpRequest(BaseModel):
+    email: EmailStr

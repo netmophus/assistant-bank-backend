@@ -76,6 +76,86 @@ def subscription_request_notification_html(request: dict) -> str:
     """
 
 
+def verification_otp_html(code: str, user_name: str = "") -> str:
+    """Template HTML pour l'OTP de vérification email (inscription DEMO)."""
+    name_line = (
+        f"<p style='color:#CBD5E1;font-size:15px;margin:0 0 16px;'>Bonjour <strong>{user_name}</strong>,</p>"
+        if user_name
+        else ""
+    )
+    return f"""
+<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0A1434;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0A1434;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#0F1E48;border-radius:20px;border:1px solid rgba(201,168,76,0.25);overflow:hidden;max-width:560px;">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:#070E28;padding:28px 36px;border-bottom:2px solid #C9A84C;">
+            <table cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="background:#1B3A8C;border-radius:10px;width:42px;height:42px;text-align:center;vertical-align:middle;">
+                  <span style="color:#C9A84C;font-size:20px;font-weight:900;">M</span>
+                </td>
+                <td style="padding-left:12px;">
+                  <p style="margin:0;color:#FFFFFF;font-size:18px;font-weight:900;letter-spacing:1px;">MIZNAS PILOT</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+          <td style="padding:36px 36px 28px;">
+            {name_line}
+            <p style="color:#CBD5E1;font-size:15px;line-height:1.6;margin:0 0 20px;">
+              Bienvenue sur Miznas Pilot. Pour finaliser votre inscription,
+              saisissez le code de vérification ci-dessous dans l'application :
+            </p>
+
+            <!-- OTP Box -->
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td align="center" style="background:#0A1434;border:2px solid #C9A84C;border-radius:14px;padding:24px 16px;">
+                  <p style="margin:0;color:#C9A84C;font-family:'Courier New',monospace;font-size:36px;font-weight:900;letter-spacing:12px;">
+                    {code}
+                  </p>
+                </td>
+              </tr>
+            </table>
+
+            <p style="color:rgba(203,213,225,0.55);font-size:13px;margin:20px 0 0;text-align:center;">
+              Ce code est valable pendant <strong style="color:#C9A84C;">10 minutes</strong>.
+            </p>
+
+            <p style="color:rgba(203,213,225,0.4);font-size:12px;margin:28px 0 0;line-height:1.6;">
+              Si vous n'êtes pas à l'origine de cette inscription, ignorez cet email.
+              Aucune action n'est nécessaire.
+            </p>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="background:#070E28;padding:18px 36px;border-top:1px solid rgba(27,58,140,0.3);">
+            <p style="margin:0;color:rgba(203,213,225,0.3);font-size:11px;text-align:center;">
+              Miznas Pilot &copy; 2025 · Plateforme bancaire UEMOA · www.miznas.co
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+"""
+
+
 def reset_password_html(reset_link: str, user_name: str = "") -> str:
     name_line = f"<p style='color:#CBD5E1;font-size:15px;'>Bonjour <strong>{user_name}</strong>,</p>" if user_name else ""
     return f"""
