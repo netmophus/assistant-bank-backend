@@ -2,10 +2,12 @@ import os
 import secrets
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from typing import Optional
 
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_superadmin
+from app.core.rate_limit import client_ip, email_key, enforce, login_guard, rate_limit
+from app.core.registration_policy import ensure_organization_exists, sanitize_registration
 from app.core.db import get_database
 from app.core.security import create_access_token, hash_password
 from app.core.constants import DEMO_ORG_ID
@@ -54,19 +56,25 @@ router = APIRouter(
 )
 
 
-@router.post("/register", response_model=UserPublic)
-async def register(user_in: UserCreate):
-    # Si pas d'organisation fournie → compte démo, on assigne à MIZNAS
-    if not user_in.organization_id:
-        from app.core.db import get_database
-        db = get_database()
-        miznas_org = await db["organizations"].find_one({"code": "MIZNAS_TEST"})
-        if not miznas_org:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Organisation démo indisponible. Contactez l'administrateur.",
-            )
-        user_in = user_in.model_copy(update={"organization_id": str(miznas_org["_id"])})
+@router.post(
+    "/register",
+    response_model=UserPublic,
+    dependencies=[Depends(rate_limit("register", 20, 600))],
+)
+async def register(
+    user_in: UserCreate,
+    caller: dict = Depends(get_superadmin),
+):
+    """Création d'un compte par un SUPER ADMINISTRATEUR authentifié (écran d'administration).
+
+    Sans jeton valide : 401. Avec un jeton non superadmin : 403. L'inscription publique est POST /auth/register-demo
+    (OTP e-mail) ; les administrateurs d'organisation utilisent POST /auth/users/org.
+    Le rôle demandé est contrôlé côté serveur (admin ou user seulement, jamais superadmin) et l'organisation doit exister.
+    """
+    from app.core.db import get_database
+
+    user_in = sanitize_registration(user_in, caller)
+    await ensure_organization_exists(get_database(), user_in.organization_id)
 
     try:
         user = await create_user(user_in)
@@ -83,7 +91,7 @@ async def register(user_in: UserCreate):
         )
 
 
-@router.post("/register-demo", response_model=RegisterDemoResponse)
+@router.post("/register-demo", response_model=RegisterDemoResponse, dependencies=[Depends(rate_limit("register_demo", 20, 3600))])
 async def register_demo(payload: RegisterDemoRequest):
     """
     Inscription gratuite DEMO via app mobile (app.miznas.co).
@@ -145,7 +153,7 @@ async def register_demo(payload: RegisterDemoRequest):
     )
 
 
-@router.post("/verify-otp", response_model=DemoRegisterResponse)
+@router.post("/verify-otp", response_model=DemoRegisterResponse, dependencies=[Depends(rate_limit("verify_otp_ip", 100, 600))])
 async def verify_demo_otp(payload: VerifyOtpRequest):
     """
     Étape 2/2 de l'inscription DEMO : valide le code OTP reçu par email,
@@ -153,6 +161,7 @@ async def verify_demo_otp(payload: VerifyOtpRequest):
     """
     from app.models.user import get_user_by_email
 
+    enforce("verify_otp_email", email_key(payload.email), 10, 600)
     try:
         await verify_otp(payload.email, payload.code)
     except OtpVerificationError as e:
@@ -229,7 +238,7 @@ async def verify_demo_otp(payload: VerifyOtpRequest):
     )
 
 
-@router.post("/resend-otp")
+@router.post("/resend-otp", dependencies=[Depends(rate_limit("resend_otp_ip", 30, 600))])
 async def resend_demo_otp(payload: ResendOtpRequest):
     """
     Renvoie un nouveau code OTP pour un email donné.
@@ -240,6 +249,8 @@ async def resend_demo_otp(payload: ResendOtpRequest):
     logger = logging.getLogger(__name__)
 
     from app.models.user import get_user_by_email
+
+    enforce("resend_otp_email", email_key(payload.email), 3, 600)
 
     ok_response = {
         "message": "Si un compte en attente de vérification existe pour cet email, un nouveau code a été envoyé.",
@@ -284,20 +295,27 @@ async def resend_demo_otp(payload: ResendOtpRequest):
     return ok_response
 
 
-@router.post("/login", response_model=Token)
-async def login(data: LoginData):
+@router.post("/login", response_model=Token, dependencies=[Depends(rate_limit("login_ip", 120, 60))])
+async def login(data: LoginData, request: Request):
     """
     Connexion : vérifie email + mot de passe,
     puis vérifie qu'il existe une licence active pour la banque.
     Les super admins (rôle "superadmin") peuvent se connecter sans licence.
     """
+    # 0) Limitation sur les ÉCHECS uniquement (par IP, par couple compte+IP avec ralentissement progressif,
+    #    et attaque répartie sur un compte). Voir app.core.rate_limit.LoginGuard.
+    ip, account = client_ip(request), email_key(data.email)
+    login_guard.check(ip, account)
+
     # 1) Vérifier les identifiants
     user = await authenticate_user(data.email, data.password)
     if not user:
+        login_guard.record_failure(ip, account)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email ou mot de passe incorrect.",
         )
+    login_guard.record_success(ip, account)
 
     # 1bis) Bloquer les users DEMO dont l'email n'est pas encore vérifié
     if user.get("is_demo") is True and not user.get("email_verified", False):
@@ -777,7 +795,7 @@ async def update_user_for_organization(
         )
 
 
-@router.post("/forgot-password")
+@router.post("/forgot-password", dependencies=[Depends(rate_limit("forgot_password_ip", 30, 900))])
 async def forgot_password(data: dict):
     """Envoie un email de réinitialisation du mot de passe via Gmail SMTP."""
     from app.models.user import get_user_by_email
@@ -786,6 +804,7 @@ async def forgot_password(data: dict):
     email = data.get("email", "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="L'email est requis")
+    enforce("forgot_password_email", email_key(email), 5, 900)
 
     # Toujours répondre la même chose (sécurité : ne pas révéler si l'email existe)
     ok_response = {"message": "Si l'email existe, un lien de réinitialisation a été envoyé"}
@@ -822,7 +841,7 @@ async def forgot_password(data: dict):
     return ok_response
 
 
-@router.post("/reset-password")
+@router.post("/reset-password", dependencies=[Depends(rate_limit("reset_password_ip", 30, 900))])
 async def reset_password(data: dict):
     """Valide le token et met à jour le mot de passe."""
     token    = data.get("token", "").strip()
